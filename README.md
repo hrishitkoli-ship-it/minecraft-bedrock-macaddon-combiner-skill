@@ -1,28 +1,88 @@
 # 🧱 Minecraft Bedrock `.mcaddon` Combiner Skill
 
-A Claude AI skill that merges multiple Minecraft Bedrock Edition add-ons into a **single `.mcaddon` file** containing one unified BP and one unified RP — just double-click to install, no load order needed.
+A Claude AI skill that merges multiple Minecraft Bedrock Edition add-ons into a **single `.mcaddon`** file — one BP, one RP, double-click to install.
 
 ---
 
 ## ✨ What it does
 
-Upload two or more `.mcaddon` or `.zip` Bedrock add-on files to Claude, and this skill:
+Upload two or more `.mcaddon` or `.zip` Bedrock add-on files to Claude and this skill produces a fully merged modpack where everything works together natively.
 
-- **Deep-merges** all BP content (items, blocks, entities, loot tables, recipes, scripts, features, biomes, dimensions, spawn rules, animations)
-- **Deep-merges** all RP content (textures, models, sounds, particles, lang files, UI, fog, render controllers)
-- **Resolves all conflicts** — namespace clashes, duplicate IDs, overlapping ore Y-ranges, entity AI collisions, script event double-fires, texture key collisions, and more
-- **Cross-links everything** so the add-ons work in harmony:
-  - 🪓 Tree cutters from any add-on fell modded trees from every other add-on
-  - 📦 Custom ingots/ores appear in each other's structure chest loot
-  - 🔥 Cross-smelting: any ore works in any custom smelter
-  - 🌀 Custom dimension portal linkage
-  - 🐾 Mob harmony: friendly mobs protected, cross-taming supported
-  - ⛏️ Ore Y-band redistribution: no two ores fight over the same depth
-  - 🧑‍🤝‍🧑 Wandering trader cross-trades
-  - 🔊 Sound, particle, and fog merging
-  - 🌐 Unified `en_US.lang` from all add-ons
+### 🪓 Tree Cutting — with custom structure support
+- Every tree-cutter and iron+ axe from any add-on fells every modded tree from every other add-on
+- **Custom structures on trees are handled intelligently:**
+  - 🐝 Beehives/nests → preserved if occupied, dropped as item if empty
+  - 🪺 Bird nests → contents dropped as items
+  - 🏮 Lanterns → dropped as items
+  - 🍄 Shelf mushrooms → dropped as items
+  - 🕸️ Vines/moss/lichen → silently removed
+  - 🐛 Cocoons → break event triggered (may spawn mobs)
+- All axes can strip all modded logs to their stripped variants
+- Uses BFS (not recursion) — no stack overflows on large trees
+- Correct durability consumed per log broken
 
-**Output:** One `.mcaddon` → `MergedPack_BP/` + `MergedPack_RP/` — install both, done.
+### ⛏️ Tool–Block Interaction Matrix
+- Pickaxe tiers enforced across all add-on ores (wrong tier = blocked with sound)
+- Hoes from any add-on till soil blocks from every other add-on
+- All modded soils become tillable farmland
+
+### 🌾 Soil & Crop Cross-Compatibility
+- Seeds from any add-on plant on tilled soil from any other add-on
+- Fertilizers from any add-on accelerate crops from any other add-on
+
+### 📦 Cross-Loot Injection
+- Custom ingots, ores, foods and seeds appear in each other's structure chests
+- Context-aware: ingots in mine chests, food in village chests, etc.
+
+### 🔥 Cross-Smelting
+- Any ore works in any custom smelter from any add-on
+- Cross-repair: same-tier materials from different add-ons repair each other's tools
+
+### 🌀 Dimension Portals
+- Custom dimensions from different add-ons are portal-linked
+- Portal cooldowns prevent teleport spam
+- Alternate destinations via holding a special item
+
+### 🐾 Mob Harmony
+- Friendly mobs from one add-on are protected from hostile mobs of another
+- Cross-add-on taming and breeding items
+- Climate-gated cross-biome mob spawning
+
+### ⛏️ Ore Y-Band Redistribution
+- No two ores compete for the same depth band
+- Non-overlapping 16-block bands assigned per dimension
+
+### 🧑‍🤝‍🧑 Wandering Trader
+- High-value items from all add-ons added to trader pool
+
+### ✅ Validation Pass
+- After merge, all JSON references checked (items, blocks, entities, textures, sounds, geometries, animations)
+- Broken references auto-fixed or logged for manual review
+
+### 🌐 Sound, Particle, Fog & Lang Merge
+- All sound events merged into one `sound_definitions.json`
+- All particle IDs merged (collisions renamed, references updated everywhere)
+- All `en_US.lang` entries unified
+
+---
+
+## 🔧 Conflict Resolution
+
+| Conflict type | How it's resolved |
+|--------------|----------------------|
+| Namespace collision | Lower-priority namespace aliased |
+| Duplicate item/block/entity ID | Higher-version add-on wins; both kept |
+| Duplicate recipe | Both kept, lower-priority renamed |
+| Loot table path clash | Pools merged, entries deduplicated |
+| Entity behavior goal clash | Deep-merged, higher-priority wins per key |
+| Ore Y-range overlap | Non-overlapping bands assigned |
+| Texture key collision | Higher-priority wins; all references updated |
+| Sound event collision | File lists merged |
+| Particle ID collision | Lower-priority renamed everywhere |
+| Script event double-fire | Per-tick guard prevents duplicate handling |
+| Scoreboard objective clash | Idempotent `getObjective ?? addObjective` pattern |
+| Animation/render controller ID clash | Lower-priority renamed; all entity refs updated |
+| UI screen collision | Manual review flagged (cannot auto-merge) |
 
 ---
 
@@ -30,50 +90,65 @@ Upload two or more `.mcaddon` or `.zip` Bedrock add-on files to Claude, and this
 
 ```
 minecraft-bedrock-macaddon-combiner-skill/
-├── SKILL.md          ← The skill file (load this into your Claude skill library)
-├── INSTALL.md        ← How to install and use the skill
+├── SKILL.md              ← Load into Claude skill library
+├── INSTALL.md            ← Setup instructions (3 methods)
+├── README.md             ← This file
 └── examples/
-    └── registry_example.js   ← Example add-on registry for reference
+    └── registry_example.js   ← Annotated ADDON_MAP example
 ```
 
 ---
 
 ## 🚀 Quick start
 
-See [INSTALL.md](./INSTALL.md) for full setup instructions.
+See [INSTALL.md](./INSTALL.md) for full setup.
 
 **TL;DR:**
-1. Add `SKILL.md` to your Claude skill library (or paste its path into your Claude Code project)
+1. Add `SKILL.md` to your Claude skill library
 2. Upload your `.mcaddon` files to Claude
 3. Say: _"Combine these add-ons"_
-4. Download the merged `.mcaddon` and install it in Bedrock
+4. Download and double-click the merged `.mcaddon`
 
 ---
 
-## 🧠 How it works
+## 🏗️ Output structure
 
-The skill runs in **6 phases**:
-
-| Phase | What happens |
-|-------|-------------|
-| 1 — Deep Inventory | Extracts and catalogues every file in every add-on |
-| 2 — Conflict Resolution | Detects and fixes all 7 categories of conflicts |
-| 3 — Cross-linking | Generates tree cutting, loot injection, portals, mob harmony, ore bands |
-| 4 — Manifests | Writes unified BP + RP manifests with correct UUIDs and engine version |
-| 5 — Packaging | Zips into a single `.mcaddon` with a full README inside |
-| 6 — Report | Embeds conflict log, ore Y-band table, and feature summary |
+```
+YourAddons_merged.mcaddon
+├── MergedPack_BP/
+│   ├── items/, blocks/, entities/, loot_tables/, recipes/
+│   ├── features/, feature_rules/, biomes/, dimensions/, spawn_rules/
+│   ├── animations/, animation_controllers/, structures/, functions/
+│   └── scripts/
+│       ├── main.js                  ← generated entry point
+│       ├── addon_<name>/            ← original scripts, isolated
+│       └── compat/
+│           ├── script_event_guard.js
+│           ├── tree_cutter.js       ← BFS felling + decoration handling
+│           ├── tool_block_matrix.js ← tier enforcement + hoe tilling
+│           ├── soil_crop.js         ← cross-planting + fertilizing
+│           ├── loot_injector.js
+│           ├── dimension_portals.js ← cooldowns + alternate destinations
+│           ├── mob_harmony.js       ← protection + cross-taming
+│           └── trade_injector.js
+└── MergedPack_RP/
+    ├── textures/ (item_texture.json + terrain_texture.json merged)
+    ├── models/, render_controllers/, animations/, animation_controllers/
+    ├── particles/, sounds/, fog/, attachables/, ui/
+    └── texts/en_US.lang (all add-ons merged)
+```
 
 ---
 
 ## ⚠️ Requirements
 
-- Minecraft Bedrock Edition 1.21.0+
-- Scripting API must be enabled in world settings (for tree cutting, portals, mob harmony)
-- Not compatible with Education Edition or encrypted add-ons
+- Minecraft Bedrock 1.21.0+
+- **Beta APIs / Scripting API** enabled in world settings (for tree cutting, portals, mob harmony, soil tilling, fertilizing)
+- Not compatible with Education Edition
 
 ---
 
 ## 📄 License
 
-MIT — free to use, fork, and extend.
+MIT
 
