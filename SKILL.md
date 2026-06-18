@@ -1,855 +1,1197 @@
 ---
-name: java-bedrock-mod-combiner
-description: "Combine multiple Minecraft Java Edition mods (.jar) OR Bedrock Edition add-ons (.mcaddon) into a single merged output — or both at once. For Java: full N-way mod merge (Fabric/Forge/NeoForge/Quilt) with unified tags, cross-mod recipes, loot injection, mixin safety analysis, config merging, and a ready-to-run compat JAR + modpack ZIP. For Bedrock: ONE merged BP + ONE merged RP, all conflicts resolved, all cross-features woven in (tree cutting, ore Y-bands, mob harmony, custom machines, function compat, UI bridge). Also handles mixed Java+Bedrock workflows via a Java→Bedrock conversion bridge. Output: merged modpack ZIP (Java) or .mcaddon (Bedrock) or both."
+name: bedrock-addon-combiner
+description: "Combine multiple Minecraft Bedrock Edition add-ons into a single .mcaddon with ONE merged BP and ONE merged RP. Inventory every pack, deep-merge all BP and RP content, resolve all conflicts (namespace, ID, loot, ore Y-range, AI, scripts, textures, sounds, particles, render controllers, UI, animations, biomes, dimensions), cross-link everything (tree cutters fell modded trees including custom structures like beehives/nests/lanterns attached to them, ores in each other's loot, cross-smelting, tool-block interaction matrix, soil/crop cross-tilling, dimension portals, mob harmony, ore Y-bands, wandering trader, lang merge), validate all references after merge. Output: MergedPack_BP/ + MergedPack_RP/ in one .mcaddon — double-click to install, no load order."
 ---
 
-# Java & Bedrock Mod Combiner Skill (v3)
+# Bedrock Add-on Combiner Skill — v4
 
-You are a senior Minecraft modpack engineer with deep expertise in **Bedrock Edition add-ons**, **Java Edition Fabric mods**, and **Java Edition Forge/NeoForge mods**. Depending on what the user uploads, you run the correct pipeline:
+You are a senior Minecraft Bedrock modpack engineer. When the user uploads two or more Bedrock Edition add-ons (`.mcaddon` or `.zip`), produce a **single `.mcaddon`** containing exactly **one `MergedPack_BP/`** and **one `MergedPack_RP/`** — all content merged, all conflicts resolved, all cross-features woven in, all references validated.
 
-| Upload type | Pipeline |
-|-------------|----------|
-| ≥2 `.mcaddon` / `.zip` Bedrock add-on files | **Bedrock Full Merge** (Phases 1–7) |
-| ≥2 Java `.jar` mod files | **Java Full Combine** (Phase J) |
-| Mix of `.mcaddon` + `.jar` | Bedrock merge + Java→Bedrock conversion bridge |
-| 1 file only | Ask if they want a second; otherwise decline |
-| Brand-new add-on/mod from scratch | Decline this skill |
+**This skill is Bedrock-only.** For Java Edition mods (`.jar`), tell the user this skill does not apply.
 
-**Prime directive (both pipelines):** The output must be a strict superset of all inputs. Every original feature works exactly as before, plus all new cross-features. If it worked in one mod it must work in the merged output.
+**Prime directive:** The merged pack is a strict superset of all inputs — every original feature works exactly as before, plus all new cross-features.
 
 ---
 
-# ═══════════════════════════════════════════════════
-# JAVA MOD COMBINE PIPELINE — Phase J
-# ═══════════════════════════════════════════════════
+## Minecraft Version Matrix
 
-Run Phase J when the user uploads ≥2 `.jar` Java Edition mod files.
+Bedrock APIs and pack formats change between versions. Detect `min_engine_version` from each add-on's `manifest.json` and apply the correct rules:
 
-## Phase J1 — Extract and Inventory All Mods
+| Engine version | Script API module | Item format | Block format | Pack format notes |
+|----------------|-------------------|-------------|--------------|-------------------|
+| 1.20.x | `@minecraft/server` 1.6–1.8 | `minecraft:item` wrapper | component-based | `format_version: "1.20.0"` |
+| 1.21.0–1.21.3 | `@minecraft/server` 1.11–1.13 | flat components | component-based | `format_version: "1.21.0"` |
+| 1.21.4–1.21.8 | `@minecraft/server` 1.14–1.16 | flat components | component-based | `format_version: "1.21.40"` |
+| 1.21.9+ | `@minecraft/server` 1.17+ | flat components | component-based | `format_version: "1.21.90"` |
 
-### J1A. Extract JAR contents
+**Rules when merging add-ons with different engine versions:**
+- Use the **highest** `min_engine_version` found across all add-ons in the merged manifest.
+- Use the **highest** `@minecraft/server` version found across all add-ons in the merged manifest.
+- If a lower-version add-on uses the `minecraft:item` wrapper format, convert its item JSON to flat component format before merging (the higher-version format is a strict superset).
+- Warn in README if any add-on's `min_engine_version` is above the current stable Bedrock release (1.21.x as of this skill version).
+- Never downgrade: the merged pack's engine version is always ≥ the highest input.
+
+---
+
+## Routing
+
+| Upload type | Action |
+|-------------|--------|
+| ≥2 `.mcaddon` / `.zip` Bedrock add-on files | **Run this skill** |
+| `.jar` files (Java Edition mods) | Decline. Say: "This skill combines Bedrock add-ons only. For Java mods, use the minecraft-modding or minecraft-datapack skills." |
+| One file only | Ask if they have a second; otherwise decline |
+| No files, just a description | Decline; ask for actual files |
+
+---
+
+## Phase 1 — Deep Inventory
+
+### 1A. Extract
 
 ```bash
-mkdir -p /home/claude/java_mods /home/claude/java_merged
+mkdir -p /home/claude/addons /home/claude/merged/BP /home/claude/merged/RP
 
-for jar in /mnt/user-data/uploads/*.jar; do
-  [ -f "$jar" ] || continue
-  name=$(basename "$jar" .jar | tr ' ' '_' | tr -cd '[:alnum:]_')
-  mkdir -p "/home/claude/java_mods/$name"
-  unzip -q "$jar" -d "/home/claude/java_mods/$name" 2>/dev/null || true
+for addon in /mnt/user-data/uploads/*.mcaddon /mnt/user-data/uploads/*.zip; do
+  [ -f "$addon" ] || continue
+  name=$(basename "$addon" | sed 's/\.[^.]*$//' | tr ' ' '_' | tr -cd '[:alnum:]_')
+  mkdir -p "/home/claude/addons/$name"
+  unzip -q "$addon" -d "/home/claude/addons/$name"
+  # Flatten single-root zips (addon_name/BP/ → BP/)
+  entries=$(ls "/home/claude/addons/$name" | wc -l)
+  if [ "$entries" -eq 1 ]; then
+    inner=$(ls "/home/claude/addons/$name")
+    if [ -d "/home/claude/addons/$name/$inner" ]; then
+      mv "/home/claude/addons/$name/$inner"/* "/home/claude/addons/$name/" 2>/dev/null
+      rmdir "/home/claude/addons/$name/$inner" 2>/dev/null
+    fi
+  fi
 done
 ```
 
-### J1B. Detect mod loader and metadata
+### 1B. Classify BP vs RP
 
 ```python
-import json, os, re
+import json, os
 
-def detect_mod(mod_dir):
-    """Returns: { loader, mod_id, version, name, description, deps, mc_version }"""
-    result = { "loader": "unknown", "mod_id": "unknown", "version": "0.0.1",
-               "name": "Unknown", "description": "", "deps": [], "mc_version": "1.20" }
+def classify_pack(manifest_path):
+    with open(manifest_path) as f:
+        m = json.load(f)
+    types = [mod.get("type","") for mod in m.get("modules", [])]
+    is_bp = any(t in ["data","script","javascript","world_template"] for t in types)
+    return ("BP" if is_bp else "RP"), m
 
-    # ── Fabric ──────────────────────────────────────────────────────
-    fmj = f"{mod_dir}/fabric.mod.json"
-    if os.path.exists(fmj):
-        with open(fmj) as f: d = json.load(f)
-        result.update({
-            "loader":      "fabric",
-            "mod_id":      d.get("id", "unknown"),
-            "version":     d.get("version", "0.0.1"),
-            "name":        d.get("name", d.get("id", "Unknown")),
-            "description": d.get("description", ""),
-            "deps":        list(d.get("depends", {}).keys()),
-            "mc_version":  d.get("depends", {}).get("minecraft", ">=1.20").lstrip(">=~^"),
-            "entrypoints": d.get("entrypoints", {}),
-            "mixins":      d.get("mixins", []),
-        })
-        return result
-
-    # ── Forge / NeoForge ────────────────────────────────────────────
-    toml = f"{mod_dir}/META-INF/mods.toml"
-    if os.path.exists(toml):
-        content = open(toml).read()
-        mod_id  = re.search(r'modId\s*=\s*"([^"]+)"', content)
-        version = re.search(r'version\s*=\s*"([^"]+)"', content)
-        name    = re.search(r'displayName\s*=\s*"([^"]+)"', content)
-        mc_dep  = re.search(r'modId\s*=\s*"minecraft".*?versionRange\s*=\s*"\[([^,\]]+)', content, re.DOTALL)
-        loader_type = "neoforge" if "neoforged" in content.lower() else "forge"
-        result.update({
-            "loader":      loader_type,
-            "mod_id":      mod_id.group(1)  if mod_id  else "unknown",
-            "version":     version.group(1) if version else "0.0.1",
-            "name":        name.group(1)    if name    else "Unknown",
-            "mc_version":  mc_dep.group(1)  if mc_dep  else "1.20",
-        })
-        return result
-
-    # ── Quilt ────────────────────────────────────────────────────────
-    qmj = f"{mod_dir}/quilt.mod.json"
-    if os.path.exists(qmj):
-        with open(qmj) as f: d = json.load(f)
-        qi = d.get("quilt_loader", {})
-        result.update({
-            "loader":  "quilt",
-            "mod_id":  qi.get("id", "unknown"),
-            "version": qi.get("version", "0.0.1"),
-            "name":    qi.get("metadata", {}).get("name", "Unknown"),
-        })
-        return result
-
-    return result
+# ADDON_MAP[addon_name]["BP"] = { path, manifest }
+# ADDON_MAP[addon_name]["RP"] = { path, manifest }
+for addon_name in os.listdir("/home/claude/addons"):
+    for root, dirs, files in os.walk(f"/home/claude/addons/{addon_name}"):
+        if "manifest.json" in files:
+            pack_type, manifest = classify_pack(f"{root}/manifest.json")
+            # register pack
 ```
 
-### J1C. Deep Inventory per mod
+### 1C. Full BP Inventory
 
-For each mod, scan every data/assets directory and build a `JAVA_MOD_MAP` entry:
+| Path | What to extract |
+|------|----------------|
+| `manifest.json` | `header.uuid`, `header.version`, `header.min_engine_version`, dependency UUIDs, module types, `@minecraft/server` version pin |
+| `items/**/*.json` | Item ID, all component keys, `minecraft:tags[]`, tool components, `mining_speed`, `attack_damage`, `durability`, `repair_items[]`, `enchantable`, `food` nutrition/saturation, `on_use_on` events |
+| `blocks/**/*.json` | Block ID, all tags, `destroy_time`, `explosion_resistance`, `material_instances`, `loot`, `geometry`, `crafting_table` custom station tag, `on_player_destroyed`, `on_interact` |
+| `entities/**/*.json` | Entity ID, `type_family[]`, all component groups + contents, all events, all `behavior.*` goals + priorities, `loot.table`, `damage_sensor.triggers[]`, animations list, render_controllers list |
+| `loot_tables/**/*.json` | Relative path, all pools, all entries (`name`, `weight`, `functions[]`, `conditions[]`) |
+| `recipes/**/*.json` | Identifier, type, all ingredient IDs + counts, output ID + count, `tags[]`, `priority` |
+| `trading_tables/**/*.json` | All tiers → trades → `wants[]`/`gives[]` item IDs, `max_uses`, `trader_exp` |
+| `scripts/**/*.js` | All `world.*Events.*subscribe` call signatures, all `namespace:id` string literals, all `scoreboard.addObjective` names, all `dynamicProperties` keys, all `import` paths, `@minecraft/server` version used |
+| `features/**/*.json` | Identifier, feature type, `fill_with` block, `may_replace[]`, y distribution params, `count` |
+| `feature_rules/**/*.json` | Feature ref, `placement_pass`, biome filter conditions, distribution |
+| `biomes/**/*.json` | Biome ID, full `climate` object (temperature, downfall, precipitation), `surface_parameters`, spawn entries, feature attachments |
+| `dimensions/**/*.json` | Dimension ID, generator, sea_level, y_min, y_max |
+| `spawn_rules/**/*.json` | Entity ID, `population_control`, all biome filter conditions, herd size |
+| `animation_controllers/**/*.json` | Controller IDs, states, transitions, `on_entry`/`on_exit` commands |
+| `animations/**/*.json` | Animation IDs, `loop`, `animation_length`, bone channels |
+| `structures/**/*.mcstructure` | Structure ID from relative path |
+| `functions/**/*.mcfunction` | All `/loot`/`/give`/`/summon`/`/setblock`/`/structure load` block+item+entity refs |
+| Tree decoration scan | Any block whose ID contains `"nest"/"hive"/"lantern"/"vine"/"moss"/"lichen"/"mushroom"/"fungus"/"cocoon"/"web"/"pod"` OR whose `minecraft:placement_filter` targets log surfaces |
+
+### 1D. Full RP Inventory
+
+| Path | What to extract |
+|------|----------------|
+| `textures/item_texture.json` | All `texture_data.<key>` → paths |
+| `textures/terrain_texture.json` | All `texture_data.<key>` → paths |
+| `textures/flipbook_textures.json` | All entries |
+| `textures/**` (raw files) | All filenames and relative paths |
+| `models/entity/**/*.json` | All `geometry.<id>` keys, bone names |
+| `render_controllers/**/*.json` | All `controller.render.<id>` keys, geometry/texture/material expressions |
+| `animations/**/*.json` | All `animation.<id>` keys |
+| `animation_controllers/**/*.json` | All `controller.animation.<id>` keys |
+| `particles/**/*.json` | All `particle_identifier` values, texture ref |
+| `sounds/sound_definitions.json` | All event names → files/volume/pitch/category |
+| `sounds/music_definitions.json` | Music event names |
+| `sounds/**` (raw files) | All `.ogg`/`.fsb` paths |
+| `texts/en_US.lang` | All `key=value` pairs |
+| `texts/languages.json` | Language list |
+| `ui/**/*.json` | Screen/namespace names, control types |
+| `attachables/**/*.json` | `identifier`, geometry, texture, render_controller refs |
+| `fog/**/*.json` | Fog `identifier`, distance/density/color settings |
+| `biomesClient.json` | Per-biome color/fog client settings |
+
+### 1E. ADDON_MAP structure
 
 ```python
-JAVA_MOD_MAP[mod_id] = {
-    "meta":        { loader, mod_id, version, name, deps, mc_version, entrypoints, mixins },
+ADDON_MAP = {
+  "addon_name": {
+    "namespace": str,
+    "bp_uuid": str, "rp_uuid": str,
+    "bp_version": list, "rp_version": list,
+    "min_engine": list,          # e.g. [1, 21, 0]
+    "script_api_version": str,   # e.g. "1.14.0"
 
-    # ── Data (behavior) ──────────────────────────────────────────────
-    "items":       [],  # { id, material, food, armor, tool_type, tags[], max_stack, fire_immune }
-    "blocks":      [],  # { id, hardness, resistance, material, harvest_tool, harvest_level, tags[] }
-    "entities":    [],  # { id, base_class, health, speed, drops[], spawn_egg, is_hostile }
-    "tile_entities": [], # { id, block_id, has_inventory, has_energy, is_machine }
-    "recipes":     [],  # { id, type, ingredients, output, group }
-    "loot_tables": [],  # { path, pools, conditions }
-    "advancements":[],  # { id, criteria, rewards }
-    "tags": {           # all tag files across namespaces
-        "items":  {},   # tag_id → [item_ids]
-        "blocks": {},   # tag_id → [block_ids]
-        "entities": {},
-        "biomes": {},
-        "dimensions": {},
-        "damage_types": {},
+    # Items (populated from 1C inventory)
+    "tools": {
+      "axe": [], "pickaxe": [], "hoe": [], "shovel": [],
+      "sword": [], "tree_cutter": [], "shears": []
     },
-    "structures":  [],  # { id, path }
-    "dimensions":  [],  # { id, type, generator }
-    "biomes":      [],  # { id, temperature, downfall, category, surface_builder }
-    "worldgen": {
-        "features":         [],
-        "configured_features": [],
-        "placed_features":  [],
-        "carvers":          [],
-        "noise_settings":   [],
-        "biome_sources":    [],
-        "structure_sets":   [],
-    },
-    "damage_types": [],
-    "trim_materials": [],
-    "trim_patterns":  [],
+    "armor": {"helmet": [], "chestplate": [], "leggings": [], "boots": []},
+    "ingots": [], "nuggets": [], "raw_ores": [],
+    "foods": [], "seeds": [], "saplings": [],
+    "fertilizers": [],
+    "misc_items": [],
 
-    # ── Assets (rendering) ───────────────────────────────────────────
-    "models": {
-        "items":  {},   # item_id → model path
-        "blocks": {},   # block_id → model path(s)
-    },
-    "blockstates": {},  # block_id → blockstate JSON path
-    "textures":    {},  # texture_key → path
-    "sounds": {
-        "sound_events": {},  # event_id → SoundEvent settings
-        "sound_files":  [],  # all .ogg paths
-    },
-    "lang":        {},  # locale → { key: value }
-    "particles":   {},  # id → particle JSON path
-    "shaders":     [],  # shader file paths (note only — no merge)
-    "atlases":     [],  # atlas definitions
+    # Blocks
+    "logs": [], "stems": [], "planks": [], "leaves": [],
+    "stripped_logs": [], "stripped_stems": [],
+    "ores": {"stone": [], "deepslate": [], "nether": [], "end": [], "custom_stone": []},
+    "crops": [], "soils": [],
+    "custom_machines": [],        # blocks that are custom crafting stations
+    "decorative_blocks": [],
+    "tree_decorations": [],       # blocks that attach to trees
 
-    # ── Code ─────────────────────────────────────────────────────────
-    "entrypoints":     {},  # { main:[], client:[], server:[] }
-    "mixin_configs":   [],  # [ "modid.mixins.json", ... ]
-    "mixin_classes":   [],  # all @Mixin target classes found in mixin JSONs
-    "event_listeners": [], # detected EventBus subscriptions (Forge) or event listeners (Fabric)
-    "capabilities":    [], # Forge capability registrations
-    "registries":      [], # custom registry definitions
-    "config_files":    [], # { filename, format: "toml"|"json"|"json5" }
+    # World gen
+    "features": [],               # { id, type, fill_block, y_min, y_max, count, dimension, biome_filter }
+    "feature_rules": [],          # { id, feature_ref, placement_pass, biome_filter }
+    "biomes": [],                 # { id, temperature, downfall, precipitation, surface_block, dimension_tag }
+    "dimensions": [],             # { id, generator, sea_level, y_min, y_max }
+
+    # Entities
+    "mobs": [],                   # { id, family_tags, behavior_keys, loot_table, spawn_biomes, is_passive, tame_items, breed_items }
+
+    # Data
+    "loot_tables": [],            # { path, context, item_ids }
+    "recipes": [],                # { type, id, inputs, output, recipe_tags, priority }
+    "custom_station_tags": [],    # recipe tags from custom crafting stations in this add-on
+    "trades": [],                 # { tier, wants, gives, max_uses }
+    "scoreboards": [],
+    "dynamic_props": [],
+    "script_files": [],           # { path, event_subscriptions, id_refs, import_paths }
+    "functions": [],              # { path, entity_refs, item_refs, block_refs }
+
+    # RP
+    "texture_keys": {"items": {}, "terrain": {}},
+    "sounds": [],                 # { event_name, files, category }
+    "music": [],
+    "particles": [],              # { identifier, texture_path }
+    "render_ctrls": [],           # { id, geometry_expr, texture_expr }
+    "geometries": [],             # { id, bones }
+    "animations_rp": [],
+    "anim_ctrls_rp": [],
+    "attachables": [],            # { identifier, geometry, texture, render_controller }
+    "fog_ids": [],
+    "ui_screens": [],
+    "lang_entries": {},           # { key: value }
+  }
 }
 ```
 
-### J1D. Tag resolution
+### 1F. Auto-categorization rules
 
-```python
-def resolve_tags(all_mods: dict) -> dict:
-    """
-    Merge all tag files across all mods into a unified tag map.
-    Tags from multiple mods that share the same tag ID are UNIONED (arrays merged).
-    Higher-version mod wins on replace=true conflicts.
-    """
-    unified_tags = { "items": {}, "blocks": {}, "entities": {}, "biomes": {}, "dimensions": {} }
-
-    for mod_id, mod in all_mods.items():
-        for category, tag_dict in mod["tags"].items():
-            for tag_id, entries in tag_dict.items():
-                if tag_id not in unified_tags[category]:
-                    unified_tags[category][tag_id] = { "replace": False, "values": [] }
-                if entries.get("replace", False):
-                    # replace=true: higher-version mod wins
-                    unified_tags[category][tag_id]["values"] = entries["values"]
-                else:
-                    # Merge: union
-                    unified_tags[category][tag_id]["values"] = list(set(
-                        unified_tags[category][tag_id]["values"] + entries["values"]
-                    ))
-    return unified_tags
-```
+| Signal | Category |
+|--------|----------|
+| `minecraft:is_axe` OR `"axe"` in ID | `tool → axe` |
+| `minecraft:is_pickaxe` OR `"pickaxe"` in ID | `tool → pickaxe` |
+| `minecraft:is_hoe` OR `"hoe"` in ID | `tool → hoe` |
+| `minecraft:is_shovel` OR `"shovel"` in ID | `tool → shovel` |
+| `minecraft:is_sword` OR `"sword"` in ID | `tool → sword` |
+| `"lumber"/"tree_cut"/"lumberjack"/"feller"/"chainsaw"` in ID | `tool → tree_cutter` |
+| `"shears"/"scissors"` in ID | `tool → shears` |
+| `"fertilizer"/"bonemeal"/"compost"/"growth"` in ID | `fertilizer` |
+| Block tag `minecraft:logs` OR `"log"/"stem"/"wood"/"hyphae"` in ID | `log/stem` |
+| `"stripped_log"/"stripped_stem"` in ID | `stripped_log/stem` |
+| Block tag `minecraft:leaves` OR `"leaves"/"foliage"` in ID | `leaves` |
+| `"planks"/"board"` in ID | `planks` |
+| `"sapling"/"seedling"/"sprout"` in ID | `sapling` |
+| `"ore"` in ID + `"deepslate"` | `ore → deepslate` |
+| `"ore"` in ID + `"nether"` | `ore → nether` |
+| `"ore"` in ID + `"end"` | `ore → end` |
+| `"ore"` in ID (other) | `ore → stone` |
+| Block tag `minecraft:crop` OR `"crop"/"plant"/"wheat"` in ID | `crop` |
+| `"soil"/"dirt"/"loam"/"peat"/"humus"` in ID + tillable event | `soil` |
+| `minecraft:food` component | `food` |
+| `"ingot"` in ID | `ingot` |
+| `"nugget"` in ID | `nugget` |
+| `"raw_"` prefix OR `"raw"` + ore sibling | `raw_ore` |
+| `"seed"` in ID | `seed` |
+| Block on log surface + `"hive"/"beehive"` in ID | `tree_decoration → beehive` |
+| Block on log surface + `"nest"/"bird"/"egg"` in ID | `tree_decoration → nest` |
+| Block on log surface + `"lantern"/"light"/"lamp"` in ID | `tree_decoration → lantern` |
+| Block on log surface + `"vine"/"moss"/"lichen"/"web"` in ID | `tree_decoration → clinging` |
+| Block on log surface + `"mushroom"/"fungus"/"shelf"` in ID | `tree_decoration → fungal` |
+| Block on log surface + `"cocoon"/"chrysalis"/"pod"` in ID | `tree_decoration → cocoon` |
+| Feature/biome with `"nether"` tag | `dimension → nether` |
+| Feature/biome with `"the_end"` tag | `dimension → end` |
+| Custom `dimensions/*.json` | `dimension → custom` |
 
 ---
 
-## Phase J2 — Java Mod Conflict Detection and Resolution
+## Phase 2 — Conflict Detection, Resolution, and Merge
 
-### J2A. Priority Order
+Log every conflict into `CONFLICT_LOG[]`. All merges target `MergedPack_BP/` and `MergedPack_RP/` — originals are never modified.
 
-Same as Bedrock: higher `version` (semver) = higher priority. Ties broken by upload order.
+### 2A. Priority Order
 
-### J2B. Namespace / ID Conflicts
+Higher `header.version` (semver compare) = higher priority. Ties → first uploaded wins.
+
+### 2B. Namespace and ID Conflicts
 
 | Conflict | Detection | Resolution |
 |----------|-----------|------------|
-| Two mods share `mod_id` | Same `mod_id` string | Lower-priority `mod_id` → `<name>_alt` throughout its merged data; log |
-| Same item ID `modid:item` | Identical identifier | Both items kept; lower-priority renamed to `<modid>_alt:<item>`; cross-recipe stubs added |
-| Same block ID | Identical identifier | Same as items |
-| Same entity ID | Identical identifier | Both kept; lower-priority renamed |
-| Same recipe path | Same `data/<ns>/recipes/<path>` | Both kept; lower-priority path gets `_<modid>` suffix |
-| Same loot table path | Same path | Merge pools (union) as in Bedrock; cap rolls if needed |
-| Same tag ID (different values) | Same tag path, different values | Union (unless `replace: true` — see J1D) |
-| Same advancement ID | Same path | Higher-priority wins; log |
-| Same structure ID | Same path | Higher-priority wins; lower-priority renamed |
-| Same biome ID | Same path | Deep merge (climate/effects higher-priority, spawners unioned) |
-| Same dimension ID | Same path | Higher-priority wins; log |
-| Same damage type ID | Same path | Higher-priority wins; log |
+| Two add-ons share namespace string | Same prefix | Lower-priority namespace → `<name>_alt` in compat cross-references only. Originals unchanged. |
+| Same block/item/entity ID | Identical `identifier` | Higher-priority wins; lower-priority file copied as `<addon>_<filename>.json`. Both IDs kept. |
+| Same recipe identifier | Same `description.identifier` | Keep both; rename lower-priority: append `_<addon_name>`. |
+| Same scoreboard objective | Same `addObjective` string | Merged scripts use: `world.scoreboard.getObjective(name) ?? world.scoreboard.addObjective(name, displayName)` |
+| Same dynamic property key | Same key | Each add-on uses its own key; compat never cross-reads. |
 
-### J2C. Mixin Safety Guard
+### 2C. BP File Merging
 
-Mixins injecting into the same target class from two mods is the most common crash source.
+#### items/ and blocks/
+- Copy all files. Filename collision → rename lower-priority to `<addon>_<filename>.json`.
+- Version format migration: if a lower-version add-on uses `"minecraft:item": { "components": {...} }` wrapper, convert to flat component format matching the highest `min_engine_version` in the merge.
+- Update cross-references after rename: `minecraft:repairable.repair_items`, `minecraft:on_use_on` block targets.
 
-```python
-def detect_mixin_conflicts(all_mods: dict) -> list:
-    """
-    Returns list of { mod_a, mod_b, target_class, conflict_type }
-    where conflict_type is one of: "same_method_inject", "same_field_redirect", "head_conflict"
-    """
-    target_map = {}  # class → [{ mod_id, mixin_class, methods }]
+#### entities/
+- Copy all files.
+- Same `identifier` → **deep merge**:
+  - `component_groups`: union; key collision → higher-priority wins, logged.
+  - `events`: union; event name collision → merge `add.component_groups[]` (dedup).
+  - Top-level `components`: higher-priority per key; log overrides.
+  - `behavior.*` goals: union; same goal key → higher-priority `priority` value wins.
+  - `damage_sensor.triggers[]`: union.
 
-    for mod_id, mod in all_mods.items():
-        for mixin_class in mod["mixin_classes"]:
-            target = mixin_class.get("target")
-            if not target: continue
-            if target not in target_map:
-                target_map[target] = []
-            target_map[target].append({
-                "mod_id": mod_id,
-                "mixin_class": mixin_class["name"],
-                "injections": mixin_class.get("injections", []),
-            })
+#### loot_tables/
+- Copy all files preserving relative paths.
+- Path collision → merge `pools[]` from both; deduplicate entries by `name`; preserve all unique `functions`.
+- Cap `rolls.max` to 8 if merged entry count > 40.
 
-    conflicts = []
-    for target, entries in target_map.items():
-        if len(entries) < 2: continue
-        for i, a in enumerate(entries):
-            for b in entries[i+1:]:
-                # Check for method-level conflicts
-                methods_a = {inj["method"] for inj in a["injections"]}
-                methods_b = {inj["method"] for inj in b["injections"]}
-                shared = methods_a & methods_b
-                if shared:
-                    conflicts.append({
-                        "mod_a": a["mod_id"], "mod_b": b["mod_id"],
-                        "target_class": target, "shared_methods": list(shared),
-                        "conflict_type": "same_method_inject",
-                    })
-    return conflicts
+#### recipes/
+- Copy all files.
+- Output ID collision → keep both; rename lower-priority.
+- **Expand `tags[]`** on ALL furnace/smelting recipes to the union of all recipe station tags found across all add-ons — so every ore works in every custom smelter.
+- If `priority` field is missing, default to `0`.
+
+#### trading_tables/
+- Copy all files. Path collision → merge `tiers[]`; within same tier index merge `trades[]` (dedup by `gives[0].item`).
+
+#### features/ and feature_rules/
+- Copy all files. ID collision → higher-priority wins; log.
+- After full copy, run **ore Y-band redistribution** (Phase 3F). Rewrite affected feature JSONs.
+
+#### biomes/
+- Copy all files. ID collision → **deep merge**: `climate` higher-priority; mob spawn entries unioned; feature attachments unioned (dedup by ref).
+- After full copy, run **climate cross-injection** (Phase 3D).
+
+#### dimensions/
+- Copy all files. ID collision → higher-priority wins; log.
+- After full copy, run **portal linkage** (Phase 3E).
+
+#### spawn_rules/
+- Copy all files.
+- Entity ID collision → merge `conditions[]` with OR logic.
+
+#### animation_controllers/ (BP) and animations/ (BP)
+- Copy all files.
+- ID collision → rename lower-priority to `controller.animation.<addon>_<original>` / `animation.<addon>_<original>`.
+- **Update all entity JSON refs** in `MergedPack_BP/entities/` to the new name. This is mandatory — failing to do so leaves broken references.
+
+#### functions/
+- Copy all `.mcfunction` files.
+- Filename collision → rename lower-priority to `<addon>_<original>.mcfunction`. Update `/function` calls in all other merged functions.
+
+#### structures/
+- Copy all `.mcstructure` files.
+- Filename collision → rename lower-priority to `<addon>_<original>.mcstructure`. Update `/structure load` commands.
+
+#### scripts/
+1. Copy each add-on's scripts to `MergedPack_BP/scripts/addon_<name>/`. Rewrite internal relative import paths to match new locations.
+2. Generate `MergedPack_BP/scripts/main.js` importing all originals + compat modules. Wrap each original import in try/catch.
+
+```js
+// MergedPack_BP/scripts/main.js — AUTO-GENERATED
+import "./compat/script_event_guard.js";  // MUST be first
+
+try { await import("./addon_treecutter/main.js"); } catch(e){ console.error("[Merge] treecutter:", String(e)); }
+try { await import("./addon_custommetal/main.js"); } catch(e){ console.error("[Merge] custommetal:", String(e)); }
+
+import "./compat/tree_cutter.js";
+import "./compat/tool_block_matrix.js";
+import "./compat/soil_crop.js";
+import "./compat/loot_injector.js";
+import "./compat/dimension_portals.js";
+import "./compat/mob_harmony.js";
+import "./compat/trade_injector.js";
 ```
 
-Generate `java_merged/compat/MixinCompatReport.md` listing every conflict with recommended resolution.
+### 2D. RP File Merging
 
-For safe conflicts (different methods on same class): no action needed — Mixin handles this natively.
-For risky conflicts (same method, same injection point): document in report; cannot auto-resolve; user must choose.
+#### textures/item_texture.json and terrain_texture.json
+- Merge all `texture_data` objects. Key collision → higher-priority wins; rename lower-priority to `<key>_<addon>`. **Update all referencing JSON** (render_controllers, attachables, entity client JSON) to the new key name.
 
-### J2D. Forge Capability Conflicts
+#### textures/flipbook_textures.json
+- Merge all entries. Dedup by `flipbook_texture` field.
+
+#### textures/ (raw files)
+- Copy all, preserving subdirectory structure. Filename collision → higher-priority wins; lower-priority renamed to `<addon>_<filename>`. Update all JSON that referenced the old path.
+
+#### models/entity/
+- Copy all geometry JSON. Geometry ID (`"geometry.<id>"`) collision → rename lower-priority to `geometry.<addon>_<id>`. **Update render_controllers and entity client JSON.**
+
+#### render_controllers/
+- Copy all. Controller ID collision → rename lower-priority to `controller.render.<addon>_<original>`. **Update entity client JSON.**
+
+#### animations/ and animation_controllers/ (RP)
+- Copy all. ID collision → rename lower-priority with `<addon>_` prefix. **Update entity client JSON refs.**
+
+#### particles/
+- Copy all. `particle_identifier` collision → rename lower-priority to `<namespace>_<addon>:<name>`. **Update all scripts and entity JSON** that reference the particle ID.
+
+#### sounds/sound_definitions.json
+- Merge all events (union). Event name collision → merge `sounds[]` file arrays; keep highest `volume`/`pitch`; keep `category` from higher-priority.
+
+#### sounds/music_definitions.json + sounds/ (raw)
+- Merge event entries (collision → higher-priority). Raw file collision → rename lower-priority with `<addon>_` prefix; update `sound_definitions.json`.
+
+#### texts/en_US.lang
+- Union all `key=value` pairs. Duplicate key → higher-priority value wins; log duplicate.
+- Merge `languages.json` (union). Append compat entries at bottom.
+
+#### attachables/
+- Copy all. `identifier` collision → higher-priority wins; log. After texture/geometry renames, update all attachable JSON refs.
+
+#### fog/
+- Copy all. Fog identifier collision → rename lower-priority to `<namespace>_<addon>:<name>`. Update biome JSON refs.
+
+#### ui/
+- Copy all. Screen namespace collision → **cannot safely auto-merge**. Higher-priority kept. Add "MANUAL REVIEW REQUIRED" to CONFLICT_LOG.
+
+#### biomesClient.json
+- Merge all per-biome entries. Collision → higher-priority wins.
+
+### 2E. TOML Config Merging (for add-ons that bundle config files)
+
+**Bug fix:** Do not append raw TOML blocks — that creates duplicate table headers which is invalid TOML. Instead, parse each TOML config as a table tree and deep-merge at the value level:
 
 ```python
-def detect_capability_conflicts(all_mods):
-    """Two mods attaching different capabilities to the same object type can conflict."""
-    cap_map = {}  # capability_id → mod_id
-    conflicts = []
-    for mod_id, mod in all_mods.items():
-        for cap in mod["capabilities"]:
-            cap_id = cap["capability_id"]
-            if cap_id in cap_map:
-                conflicts.append({ "cap": cap_id, "mod_a": cap_map[cap_id], "mod_b": mod_id })
-            cap_map[cap_id] = mod_id
-    return conflicts
+def merge_toml_safe(base_text: str, incoming_text: str, incoming_addon: str) -> str:
+    """
+    Deep-merges two TOML strings. Keys absent in base are added from incoming.
+    Keys present in base are NOT overwritten (base = higher-priority).
+    Returns valid merged TOML string.
+    Uses tomllib (Python 3.11+) to parse; tomli_w to serialize.
+    """
+    import tomllib, tomli_w
+    base = tomllib.loads(base_text)
+    incoming = tomllib.loads(incoming_text)
+
+    def deep_merge(b: dict, n: dict):
+        for k, v in n.items():
+            if k not in b:
+                b[k] = v
+            elif isinstance(b[k], dict) and isinstance(v, dict):
+                deep_merge(b[k], v)
+            # else: base value wins — do not overwrite
+
+    deep_merge(base, incoming)
+    return f"# Merged: includes settings from {incoming_addon}\n" + tomli_w.dumps(base)
 ```
 
-### J2E. Config File Merging
+### 2F. Script Event Guard
 
-```python
-def merge_configs(all_mods: dict, output_dir: str):
-    """
-    For mods that share config keys (common in Forge/Fabric mods using the same config library),
-    merge config files so defaults don't stomp each other.
-    """
-    import tomllib, json
+`MergedPack_BP/scripts/compat/script_event_guard.js` — import **first** in `main.js`. Uses a tick-counter Map to prevent double-handling per game tick:
 
-    for mod_id, mod in all_mods.items():
-        for cfg in mod["config_files"]:
-            dest = f"{output_dir}/config/{cfg['filename']}"
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+```js
+import { world, system } from "@minecraft/server";
 
-            if not os.path.exists(dest):
-                # First mod with this config: just copy
-                shutil.copy(cfg["path"], dest)
-            else:
-                # Merge: load both, deep-merge (mod's values override existing only if key absent)
-                if cfg["format"] == "toml":
-                    # Emit a comment-annotated merged TOML
-                    existing = open(dest).read()
-                    incoming = open(cfg["path"]).read()
-                    with open(dest, "a") as f:
-                        f.write(f"\n# ── Merged from {mod_id} ──\n")
-                        f.write(incoming)
-                elif cfg["format"] in ["json", "json5"]:
-                    with open(dest) as f: base = json.load(f)
-                    with open(cfg["path"]) as f: new = json.load(f)
-                    # Deep merge: new values only set if key absent in base
-                    def deep_merge(b, n):
-                        for k, v in n.items():
-                            if k not in b:
-                                b[k] = v
-                            elif isinstance(b[k], dict) and isinstance(v, dict):
-                                deep_merge(b[k], v)
-                    deep_merge(base, new)
-                    with open(dest, "w") as f: json.dump(base, f, indent=2)
+const handled = new Map();
+let tick = 0;
+
+system.runInterval(() => {
+  tick++;
+  for (const [k, t] of handled) {
+    if (tick - t > 1) handled.delete(k);
+  }
+}, 1);
+
+export function guardEvent(key) {
+  if (handled.has(key)) return false;
+  handled.set(key, tick);
+  return true;
+}
+
+export function onPlayerBreakBlock(callback) {
+  world.beforeEvents.playerBreakBlock.subscribe((ev) => {
+    const key = `break:${ev.block.typeId}:${ev.player.id}:${ev.block.location.x},${ev.block.location.y},${ev.block.location.z}`;
+    if (!guardEvent(key)) return;
+    callback(ev);
+  });
+}
+
+export function onItemUseOn(callback) {
+  world.afterEvents.itemUseOn.subscribe((ev) => {
+    const key = `useOn:${ev.itemStack?.typeId}:${ev.source?.id}:${ev.block?.location.x},${ev.block?.location.y},${ev.block?.location.z}`;
+    if (!guardEvent(key)) return;
+    callback(ev);
+  });
+}
 ```
 
 ---
 
-## Phase J3 — Java Cross-Mod Feature Weaving
+## Phase 3 — Cross-Add-on Feature Generation
 
-### J3A. Cross-Mod OreDict / Tag Unification
+All compat scripts → `MergedPack_BP/scripts/compat/`.
+All compat RP overrides → `MergedPack_RP/`.
 
-Generate unified tag files in `java_merged/data/c/tags/` (Fabric common convention) and `java_merged/data/forge/tags/` (Forge convention):
+### 3A. Tree Cutter — BFS with Custom Tree Structure Handling
 
-```python
-def generate_unified_tags(all_mods: dict, unified_tags: dict, output_dir: str):
-    """
-    Writes merged tag JSONs to output_dir/data/<namespace>/tags/<category>/<id>.json
-    Also generates c: (common) and forge: namespace aliases for cross-loader compat.
-    """
-    for category, tag_dict in unified_tags.items():
-        for tag_id, tag_data in tag_dict.items():
-            ns, path = tag_id.split(":", 1) if ":" in tag_id else ("minecraft", tag_id)
-            out_path = f"{output_dir}/data/{ns}/tags/{category}/{path}.json"
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, "w") as f:
-                json.dump({ "replace": False, "values": tag_data["values"] }, f, indent=2)
+Uses **iterative BFS** (not recursive `system.run` chains — those overflow call stacks on trees > ~30 logs).
 
-    # Generate c: namespace aliases (Fabric common tags standard)
-    # e.g.  c:ingots/iron → contains all modded iron ingots
-    common_tag_aliases = {
-        "items": {
-            "c:ingots":           [v for mod in all_mods.values() for v in mod["items"]
-                                   if "ingot" in v["id"]],
-            "c:nuggets":          [v for mod in all_mods.values() for v in mod["items"]
-                                   if "nugget" in v["id"]],
-            "c:raw_ores":         [v for mod in all_mods.values() for v in mod["items"]
-                                   if v["id"].startswith("raw_") or "raw_ore" in v["id"]],
-            "c:ores":             [v for mod in all_mods.values() for v in mod["blocks"]
-                                   if "ore" in v["id"]],
-            "c:storage_blocks":   [v for mod in all_mods.values() for v in mod["blocks"]
-                                   if any(k in v["id"] for k in ["_block","storage","compressed"])],
-            "c:foods":            [v for mod in all_mods.values() for v in mod["items"]
-                                   if v.get("food")],
-            "c:seeds":            [v for mod in all_mods.values() for v in mod["items"]
-                                   if "seed" in v["id"]],
-            "c:gems":             [v for mod in all_mods.values() for v in mod["items"]
-                                   if any(k in v["id"] for k in ["gem","crystal","shard","dust"])],
-            "c:dusts":            [v for mod in all_mods.values() for v in mod["items"]
-                                   if "dust" in v["id"]],
-        },
-        "blocks": {
-            "c:ores/in_ground":   [v for mod in all_mods.values() for v in mod["blocks"]
-                                   if "ore" in v["id"]],
-            "c:logs":             [v for mod in all_mods.values() for v in mod["blocks"]
-                                   if "log" in v["id"] or "stem" in v["id"]],
-            "c:leaves":           [v for mod in all_mods.values() for v in mod["blocks"]
-                                   if "leaves" in v["id"] or "foliage" in v["id"]],
-            "c:dirt":             [v for mod in all_mods.values() for v in mod["blocks"]
-                                   if any(k in v["id"] for k in ["dirt","soil","loam","humus","peat"])],
-        }
-    }
+```js
+// MergedPack_BP/scripts/compat/tree_cutter.js
+import { world, system, ItemStack } from "@minecraft/server";
+import { onPlayerBreakBlock } from "./script_event_guard.js";
 
-    for category, aliases in common_tag_aliases.items():
-        for tag_id, items in aliases.items():
-            ns, path = tag_id.split(":", 1)
-            out_path = f"{output_dir}/data/{ns}/tags/{category}/{path}.json"
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            values = list({i["id"] if isinstance(i, dict) else i for i in items})
-            with open(out_path, "w") as f:
-                json.dump({ "replace": False, "values": values }, f, indent=2)
-```
+// ── ALL values below are populated from ADDON_MAP at generation time ──
 
-### J3B. Cross-Mod Recipe Injection
+const TREE_CUTTER_TOOLS = new Set([
+  // toolType=tree_cutter from any add-on
+  "treecutter:lumber_axe", "treecutter:mega_axe",
+  // iron+ tier axes from any add-on also fell whole trees
+  "custommetal:stellite_axe",
+]);
 
-```python
-def generate_cross_mod_recipes(all_mods: dict, unified_tags: dict, output_dir: str):
-    """
-    Generates cross-mod crafting recipes so materials from mod A work in mod B recipes
-    and vice versa, using unified tags as ingredients.
-    """
-    recipes = []
+const ALL_LOG_BLOCKS = new Set([
+  // all log/stem/wood block IDs from all add-ons
+  "treecutter:spirit_log", "treecutter:ash_log",
+]);
 
-    # Cross-smelting: every ore from any mod can be smelted in any furnace-type recipe
-    all_ores = [b for mod in all_mods.values() for b in mod["blocks"] if "ore" in b["id"]]
-    all_ingots = [i for mod in all_mods.values() for i in mod["items"] if "ingot" in i["id"]]
+const ALL_LEAF_BLOCKS = new Set([
+  "treecutter:spirit_leaves", "treecutter:ash_leaves",
+]);
 
-    for ore in all_ores:
-        # Find the matching ingot (by material name)
-        material = ore["id"].split(":")[1].replace("_ore","").replace("deepslate_","").replace("nether_","")
-        matching_ingot = next((i for i in all_ingots if material in i["id"]), None)
-        if not matching_ingot: continue
-
-        ore_mod = ore["id"].split(":")[0]
-        ingot_mod = matching_ingot["id"].split(":")[0]
-        if ore_mod == ingot_mod: continue  # same mod, already handled by the mod itself
-
-        recipe_id = f"compat/{ore_mod}_ore_to_{ingot_mod}_ingot"
-        recipes.append({
-            "type": "minecraft:smelting",
-            "ingredient": { "item": ore["id"] },
-            "result": { "id": matching_ingot["id"], "count": 1 },
-            "experience": 0.7,
-            "cookingtime": 200,
-            "_comment": f"Cross-mod smelting: {ore['id']} → {matching_ingot['id']}"
-        })
-        # Also blasting
-        recipes.append({
-            "type": "minecraft:blasting",
-            "ingredient": { "item": ore["id"] },
-            "result": { "id": matching_ingot["id"], "count": 1 },
-            "experience": 0.7,
-            "cookingtime": 100,
-        })
-
-    # Cross-repair: same-tier materials across mods
-    all_tools = [i for mod in all_mods.values() for i in mod["items"]
-                 if any(t in i.get("tool_type","") for t in ["sword","pickaxe","axe","shovel","hoe"])]
-    # (Smithing/anvil recipe generation for cross-mod repair is emitted as smithing_transform recipes)
-
-    # Write all cross-mod recipes
-    for recipe in recipes:
-        rid = recipe.get("_comment","compat_recipe").split(":")[-1].replace(" ","_")
-        out_path = f"{output_dir}/data/compat/recipes/{rid}.json"
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        r = {k: v for k, v in recipe.items() if not k.startswith("_")}
-        with open(out_path, "w") as f: json.dump(r, f, indent=2)
-```
-
-### J3C. Cross-Mod Loot Table Injection
-
-Same logic as Bedrock Phase 3G, adapted for Java data pack format:
-
-```python
-def inject_cross_mod_loot(all_mods: dict, output_dir: str):
-    """Injects items from each mod into other mods' loot tables."""
-    for mod_id, mod in all_mods.items():
-        for loot in mod["loot_tables"]:
-            path = loot["path"]
-            out_path = f"{output_dir}/{path}"
-            if not os.path.exists(out_path): continue
-
-            with open(out_path) as f: table = json.load(f)
-
-            # Determine context from path
-            context = "fallback"
-            for keyword, ctx in [("chest","chest"),("mob","mob"),("block","block"),
-                                  ("fishing","fishing"),("gameplay","gameplay")]:
-                if keyword in path: context = ctx; break
-
-            # Inject items from other mods as a new pool
-            inject_items = []
-            for other_id, other_mod in all_mods.items():
-                if other_id == mod_id: continue
-                for item in other_mod["ingots"] + other_mod["misc_items"]:
-                    inject_items.append({
-                        "type": "minecraft:item",
-                        "name": item["id"],
-                        "weight": 5,
-                        "functions": [{"function": "minecraft:set_count",
-                                       "count": {"min": 1, "max": 3, "type": "minecraft:uniform"}}]
-                    })
-
-            if inject_items:
-                table.setdefault("pools", []).append({
-                    "rolls": {"min": 0, "max": 1, "type": "minecraft:uniform"},
-                    "bonus_rolls": 0.0,
-                    "entries": inject_items[:12],  # cap at 12 to avoid bloat
-                    "conditions": [{"condition": "minecraft:random_chance", "chance": 0.15}]
-                })
-                with open(out_path, "w") as f: json.dump(table, f, indent=2)
-```
-
-### J3D. Cross-Mod Biome Mob Spawning
-
-```python
-def cross_inject_spawners(all_mods: dict, output_dir: str):
-    """
-    Mobs from mod A that are compatible with biomes from mod B get spawn entries added.
-    Compatibility: same temperature/precipitation range.
-    """
-    for mod_id, mod in all_mods.items():
-        for biome in mod["biomes"]:
-            biome_path = f"{output_dir}/data/{biome['id'].replace(':','/data/',1)}/worldgen/biome/{biome['id'].split(':')[1]}.json"
-            if not os.path.exists(biome_path): continue
-
-            with open(biome_path) as f: biome_json = json.load(f)
-
-            spawners = biome_json.setdefault("spawners", {})
-
-            for other_id, other_mod in all_mods.items():
-                if other_id == mod_id: continue
-                for mob in other_mod["entities"]:
-                    if not mob.get("is_hostile"): continue
-                    # Simple climate check — inject hostile mobs into compatible biomes
-                    spawners.setdefault("monster", []).append({
-                        "type": mob["id"],
-                        "weight": 5,
-                        "minCount": 1,
-                        "maxCount": 3
-                    })
-
-            with open(biome_path, "w") as f: json.dump(biome_json, f, indent=2)
-```
-
-### J3E. Cross-Mod Advancements
-
-Generate `java_merged/data/compat/advancements/cross_mod_explorer.json` — a root advancement that unlocks when the player collects one item from each merged mod:
-
-```json
-{
-  "display": {
-    "icon": { "id": "minecraft:nether_star" },
-    "title": { "text": "Merged Pack Explorer" },
-    "description": { "text": "Collect an item from every merged mod" },
-    "frame": "challenge",
-    "announce_to_chat": true,
-    "show_toast": true
+// log_id → { sapling, saplingDropChance, strippedLog }
+const LOG_DATA = {
+  "treecutter:spirit_log": {
+    sapling: "treecutter:spirit_sapling", saplingDropChance: 0.15,
+    strippedLog: "treecutter:stripped_spirit_log"
   },
-  "parent": "minecraft:story/root",
-  "criteria": {
-    "<mod_id>_item": {
-      "trigger": "minecraft:inventory_changed",
-      "conditions": {
-        "items": [{ "items": ["<first_item_from_mod>"] }]
+};
+
+// Decoration strategy per block ID
+// "preserve_if_occupied" → leave if occupied block state > 0, else drop item
+// "drop"                 → remove and spawn item(s)
+// "trigger"              → use setblock destroy to fire on_player_destroyed
+// "remove"               → silently remove (vines, moss, lichen)
+const TREE_DECORATIONS = {
+  "custombees:modded_beehive": { strategy: "preserve_if_occupied", occupancyState: "honey_level", dropItem: "custombees:honeycomb" },
+  "naturemobs:bird_nest":      { strategy: "drop", dropItem: "naturemobs:bird_egg", dropCount: [1, 3] },
+  "magicmod:glowing_lantern":  { strategy: "drop", dropItem: "magicmod:glowing_lantern", dropCount: [1, 1] },
+  "naturemobs:tree_moss":      { strategy: "remove" },
+  "fungi:shelf_mushroom":      { strategy: "drop", dropItem: "fungi:shelf_mushroom", dropCount: [1, 2] },
+  "insects:silk_cocoon":       { strategy: "trigger" },
+};
+
+const DECORATION_KEYWORDS = ["nest","hive","lantern","vine","moss","lichen","mushroom","fungus","cocoon","web","pod"];
+const MAX_FELL = 256;
+// ─────────────────────────────────────────────────────────────────
+
+onPlayerBreakBlock((ev) => {
+  const held = ev.player.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+  if (!held || !TREE_CUTTER_TOOLS.has(held.typeId)) return;
+  if (!ALL_LOG_BLOCKS.has(ev.block.typeId) && !ev.block.hasTag("minecraft:logs")) return;
+
+  const origin = { ...ev.block.location };
+  const dim = ev.player.dimension;
+  const player = ev.player;
+
+  system.run(() => {
+    const { logs, decorations } = scanTree(dim, origin);
+    for (const d of decorations) handleDecoration(dim, d.pos, d.blockId);
+    let broken = 0;
+    for (const { pos, blockId } of logs) {
+      if (broken >= MAX_FELL) break;
+      const block = dim.getBlock(pos);
+      if (!block || block.typeId !== blockId) continue;
+      const data = LOG_DATA[blockId];
+      if (data && Math.random() < data.saplingDropChance) {
+        dim.spawnItem(new ItemStack(data.sapling, 1), { x: pos.x+.5, y: pos.y+1, z: pos.z+.5 });
+      }
+      block.setType("minecraft:air");
+      broken++;
+    }
+    consumeDurability(player, broken);
+  });
+});
+
+function scanTree(dim, origin) {
+  const logs = [], decorations = [], visited = new Set();
+  const queue = [origin];
+  while (queue.length && logs.length < MAX_FELL) {
+    const pos = queue.shift();
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    const block = dim.getBlock(pos);
+    if (!block) continue;
+    const bType = block.typeId;
+    const isLog  = ALL_LOG_BLOCKS.has(bType)  || block.hasTag("minecraft:logs");
+    const isLeaf = ALL_LEAF_BLOCKS.has(bType) || block.hasTag("minecraft:leaves");
+    const isDeco = isDecoration(bType);
+    if (isLog) {
+      logs.push({ pos, blockId: bType });
+      for (const o of [{x:1,y:0,z:0},{x:-1,y:0,z:0},{x:0,y:0,z:1},{x:0,y:0,z:-1},{x:0,y:1,z:0},
+                       {x:1,y:1,z:0},{x:-1,y:1,z:0},{x:0,y:1,z:1},{x:0,y:1,z:-1},
+                       {x:1,y:1,z:1},{x:-1,y:1,z:1},{x:1,y:1,z:-1},{x:-1,y:1,z:-1}]) {
+        queue.push({ x:pos.x+o.x, y:pos.y+o.y, z:pos.z+o.z });
+      }
+      // Check sides for decorations attached to this log
+      for (const o of [{x:1,y:0,z:0},{x:-1,y:0,z:0},{x:0,y:0,z:1},{x:0,y:0,z:-1},{x:0,y:-1,z:0}]) {
+        queue.push({ x:pos.x+o.x, y:pos.y+o.y, z:pos.z+o.z });
+      }
+    } else if (isLeaf) {
+      for (const o of [{x:0,y:1,z:0},{x:1,y:0,z:0},{x:-1,y:0,z:0},{x:0,y:0,z:1},{x:0,y:0,z:-1}])
+        queue.push({ x:pos.x+o.x, y:pos.y+o.y, z:pos.z+o.z });
+    } else if (isDeco) {
+      decorations.push({ pos, blockId: bType });
+    }
+  }
+  return { logs, decorations };
+}
+
+function isDecoration(id) {
+  return !!TREE_DECORATIONS[id] || DECORATION_KEYWORDS.some(k => id.includes(k));
+}
+
+function handleDecoration(dim, pos, blockId) {
+  const block = dim.getBlock(pos);
+  if (!block || block.typeId !== blockId) return;
+  const rule = TREE_DECORATIONS[blockId] ?? { strategy: "remove" };
+  if (rule.strategy === "remove") { block.setType("minecraft:air"); return; }
+  if (rule.strategy === "preserve_if_occupied") {
+    try {
+      const level = block.permutation.getState(rule.occupancyState ?? "honey_level") ?? 0;
+      if (level > 0) return; // occupied — leave it
+    } catch(_) {}
+    if (rule.dropItem) dim.spawnItem(new ItemStack(rule.dropItem, 1), { x:pos.x+.5, y:pos.y+.5, z:pos.z+.5 });
+    block.setType("minecraft:air");
+    return;
+  }
+  if (rule.strategy === "drop") {
+    if (rule.dropItem) {
+      const [min, max] = rule.dropCount ?? [1, 1];
+      const count = Math.floor(Math.random() * (max - min + 1)) + min;
+      dim.spawnItem(new ItemStack(rule.dropItem, count), { x:pos.x+.5, y:pos.y+.5, z:pos.z+.5 });
+    }
+    block.setType("minecraft:air");
+    return;
+  }
+  if (rule.strategy === "trigger") {
+    dim.runCommand(`setblock ${pos.x} ${pos.y} ${pos.z} air destroy`);
+  }
+}
+
+function consumeDurability(player, blocksBroken) {
+  try {
+    const eq = player.getComponent("minecraft:equippable");
+    const item = eq?.getEquipment("Mainhand");
+    if (!item) return;
+    const dur = item.getComponent("minecraft:durability");
+    if (!dur) return;
+    dur.damage = Math.min(dur.maxDurability, dur.damage + blocksBroken);
+    eq.setEquipment("Mainhand", item);
+  } catch(_) {} // fail silently on older engine versions
+}
+```
+
+Also generate **log stripping cross-compat** in the same file:
+
+```js
+// Cross-addon log stripping — any registered axe strips any modded log
+const STRIP_MAP = new Map(
+  // Populated from ADDON_MAP LOG_DATA: log_id → stripped_log_id
+  Object.entries(LOG_DATA)
+    .filter(([_, d]) => d.strippedLog)
+    .map(([id, d]) => [id, d.strippedLog])
+);
+const ALL_AXE_TOOLS = new Set([...TREE_CUTTER_TOOLS]); // axes are a superset of tree_cutters
+
+world.beforeEvents.playerInteractWithBlock.subscribe((ev) => {
+  const held = ev.player.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+  if (!held || !ALL_AXE_TOOLS.has(held.typeId)) return;
+  const stripped = STRIP_MAP.get(ev.block.typeId);
+  if (!stripped) return;
+  ev.cancel = true;
+  system.run(() => {
+    ev.block.setType(stripped);
+    ev.player.dimension.playSound("dig.wood", ev.block.location, { volume: 1, pitch: 0.8 });
+  });
+});
+```
+
+### 3B. Tool–Block Interaction Matrix
+
+```js
+// MergedPack_BP/scripts/compat/tool_block_matrix.js
+import { world, system } from "@minecraft/server";
+import { onPlayerBreakBlock } from "./script_event_guard.js";
+
+// Tier order: higher index = stronger
+const TIER_ORDER = ["wood","stone","iron","gold","diamond","netherite"];
+
+// All registered pickaxes from all add-ons: Map<item_id, tier>
+const ALL_PICKAXES = new Map([
+  ["custommetal:stellite_pickaxe", "diamond"],
+]);
+
+// All registered ores with required tier to mine: Map<block_id, required_tier>
+const ORE_TIER_REQUIRED = new Map([
+  ["custommetal:stellite_ore", "iron"],
+  ["custommetal:deepslate_stellite_ore", "iron"],
+]);
+
+// All registered hoes from all add-ons
+const ALL_HOES = new Set(["customfarm:golden_hoe"]);
+
+// Soil blocks → what they become when tilled: Map<block_id, result_block_id>
+const HOE_TILL_MAP = new Map([
+  ["customfarm:rich_soil",     "customfarm:tilled_rich_soil"],
+  ["customfarm:volcanic_soil", "customfarm:tilled_volcanic_soil"],
+  ["minecraft:dirt",           "minecraft:farmland"],
+  ["minecraft:grass_block",    "minecraft:farmland"],
+]);
+
+// Ore tier enforcement
+onPlayerBreakBlock((ev) => {
+  const held = ev.player.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+  if (!held) return;
+  const required = ORE_TIER_REQUIRED.get(ev.block.typeId);
+  if (!required) return;
+  const toolTier = ALL_PICKAXES.get(held.typeId);
+  if (!toolTier) return; // not a registered pickaxe — let vanilla handle it
+  if (TIER_ORDER.indexOf(toolTier) < TIER_ORDER.indexOf(required)) {
+    ev.cancel = true;
+    system.run(() => ev.player.dimension.playSound("note.bass", ev.block.location, { volume: 0.5, pitch: 0.5 }));
+  }
+});
+
+// Cross-addon hoe tilling
+onPlayerBreakBlock((ev) => {
+  const held = ev.player.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+  if (!held || !ALL_HOES.has(held.typeId)) return;
+  const result = HOE_TILL_MAP.get(ev.block.typeId);
+  if (!result) return;
+  ev.cancel = true;
+  system.run(() => {
+    ev.block.setType(result);
+    ev.player.dimension.playSound("use.grass", ev.block.location, { volume: 1, pitch: 1 });
+  });
+});
+```
+
+### 3C. Soil and Crop Cross-Compatibility
+
+```js
+// MergedPack_BP/scripts/compat/soil_crop.js
+import { world, system, ItemStack } from "@minecraft/server";
+import { onItemUseOn } from "./script_event_guard.js";
+
+// Map<soil_block_id, Set<seed_item_id>> — which seeds can plant on which tilled soil
+const CROSS_PLANTABLE = new Map([
+  ["customfarm:tilled_rich_soil",     new Set(["customfarm:starwheat_seeds","minecraft:wheat_seeds"])],
+  ["customfarm:tilled_volcanic_soil", new Set(["customfarm:starwheat_seeds"])],
+  ["minecraft:farmland",              new Set(["customfarm:starwheat_seeds"])],
+]);
+
+// Map<seed_item_id, { targetBlock, growthStates }>
+const SEED_TO_CROP = new Map([
+  ["customfarm:starwheat_seeds", { targetBlock: "customfarm:starwheat_crop", growthStates: 7 }],
+]);
+
+// All fertilizer items from all add-ons
+const ALL_FERTILIZERS = new Set(["minecraft:bone_meal","customfarm:star_fertilizer"]);
+
+// All crop blocks from all add-ons — built from SEED_TO_CROP values
+const ALL_CROPS = new Set([...SEED_TO_CROP.values()].map(v => v.targetBlock));
+
+// Cross-planting
+onItemUseOn((ev) => {
+  const itemId = ev.itemStack?.typeId, blockId = ev.block?.typeId;
+  if (!itemId || !blockId) return;
+  const seeds = CROSS_PLANTABLE.get(blockId);
+  if (!seeds?.has(itemId)) return;
+  const cropData = SEED_TO_CROP.get(itemId);
+  if (!cropData) return;
+  system.run(() => {
+    const above = ev.block.above();
+    if (!above || above.typeId !== "minecraft:air") return;
+    above.setType(cropData.targetBlock);
+    try { above.setPermutation(above.permutation.withState("growth", 0)); } catch(_) {}
+    // Consume 1 seed from inventory
+    const inv = ev.source.getComponent("minecraft:inventory")?.container;
+    if (inv) {
+      const slot = ev.source.selectedSlotIndex;
+      const item = inv.getItem(slot);
+      if (item?.typeId === itemId && item.amount > 0) {
+        item.amount--;
+        inv.setItem(slot, item.amount === 0 ? undefined : item);
       }
     }
-  },
-  "requirements": [["<mod_id>_item" /* one per mod */]],
-  "rewards": {
-    "experience": 100
+  });
+});
+
+// Cross-fertilizing
+onItemUseOn((ev) => {
+  const itemId = ev.itemStack?.typeId, blockId = ev.block?.typeId;
+  if (!itemId || !blockId) return;
+  if (!ALL_FERTILIZERS.has(itemId) || !ALL_CROPS.has(blockId)) return;
+  system.run(() => {
+    try {
+      const cur = ev.block.permutation.getState("growth") ?? 0;
+      const cropData = [...SEED_TO_CROP.values()].find(v => v.targetBlock === blockId);
+      const max = cropData?.growthStates ?? 7;
+      const next = Math.min(max, cur + Math.floor(Math.random() * 3) + 2);
+      ev.block.setPermutation(ev.block.permutation.withState("growth", next));
+      ev.block.dimension.spawnParticle("minecraft:crop_growth_emitter",
+        { x: ev.block.location.x+.5, y: ev.block.location.y+.5, z: ev.block.location.z+.5 });
+    } catch(_) {}
+  });
+});
+```
+
+### 3D. Climate-Gated Biome Cross-Injection
+
+Generate `MergedPack_BP/feature_rules/compat/<feature>_in_<dim>.json` for each compatible pair:
+
+| Add-on B biome temperature | Compatible injection targets |
+|---------------------------|------------------------------|
+| `< 0.15` (frozen) | Overworld frozen zones, custom cold dims |
+| `0.15–0.5` (temperate) | Overworld, overworld-like custom dims |
+| `> 0.5` (warm/hot) | Overworld warm zones, Nether-adjacent custom dims |
+| `precipitation = none` | Desert, Nether, End-adjacent dims |
+| Biome has `nether` tag | Nether and custom Nether-type dims only |
+| Biome has `the_end` tag | End and custom End-type dims only |
+
+Template:
+```json
+{
+  "format_version": "1.13.0",
+  "minecraft:feature_rules": {
+    "description": {
+      "identifier": "compat:inject_<feature>_into_<dim>",
+      "places_feature": "<addon>:<feature_id>"
+    },
+    "conditions": {
+      "placement_pass": "surface_pass",
+      "minecraft:biome_filter": [{ "test": "has_biome_tag", "value": "<dim_biome_tag>" }]
+    },
+    "distribution": {
+      "iterations": 1,
+      "x": { "distribution": "uniform", "extent": [0, 16] },
+      "y": "query.heightmap(v.worldx, v.worldz)",
+      "z": { "distribution": "uniform", "extent": [0, 16] }
+    }
   }
 }
 ```
 
----
+### 3E. Dimension Portal Linkage
 
-## Phase J4 — Asset Merging (Resources)
+`MergedPack_BP/scripts/compat/dimension_portals.js`:
 
-### J4A. Model and Texture Merging
+```js
+import { world, system } from "@minecraft/server";
 
-```bash
-mkdir -p /home/claude/java_merged/assets
+const PORTAL_LINKS = [
+  // Generated from ADDON_MAP dimensions — one entry per portal frame block
+  {
+    frameBlock: "addona:portal_frame",
+    activatorItem: null,             // null = vanilla flint_and_steel
+    altActivatorItem: "addonb:dim_key",  // hold this to go to alternate dimension
+    fromDimension: "minecraft:overworld",
+    toDimension: "addona:custom_dim",
+    altDimension: "addonb:other_dim",
+    spawnY: 64,
+    cooldownTicks: 80,               // 4-second cooldown prevents re-fire
+    particle: "minecraft:portal_directional"
+  },
+];
 
-# Copy all assets preserving namespaces — each mod's namespace is isolated
-for mod_dir in /home/claude/java_mods/*/; do
-  mod_id=$(python3 -c "
-import json, os
-fmj='$mod_dir/fabric.mod.json'
-if os.path.exists(fmj):
-    print(json.load(open(fmj)).get('id','unknown'))
-else:
-    print('unknown')
-" 2>/dev/null)
-  # Assets use the mod's own namespace — copy preserves them
-  [ -d "$mod_dir/assets" ] && cp -rn "$mod_dir/assets" /home/claude/java_merged/ 2>/dev/null || true
-done
+const cooldowns = new Map(); // playerId → expiry tick
+let tick = 0;
+system.runInterval(() => tick++, 1);
+
+world.afterEvents.playerInteractWithBlock.subscribe((ev) => {
+  for (const link of PORTAL_LINKS) {
+    if (ev.block.typeId !== link.frameBlock) continue;
+    if (ev.player.dimension.id !== link.fromDimension) continue;
+    if ((cooldowns.get(ev.player.id) ?? 0) > tick) continue;
+    const held = ev.player.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+    const useAlt = link.altActivatorItem && held?.typeId === link.altActivatorItem;
+    const dest = useAlt ? link.altDimension : link.toDimension;
+    const loc = ev.player.location;
+    system.run(() => {
+      try {
+        ev.player.teleport({ x: loc.x, y: link.spawnY, z: loc.z },
+          { dimension: world.getDimension(dest) });
+        world.getDimension(dest).spawnParticle(link.particle, { x: loc.x, y: link.spawnY+1, z: loc.z });
+        cooldowns.set(ev.player.id, tick + link.cooldownTicks);
+      } catch(e) { console.error("[Merge] Portal:", String(e)); }
+    });
+    break;
+  }
+});
 ```
 
-**Conflict rule:** Asset namespaces (`assets/<modid>/`) are naturally isolated — no conflicts unless two mods use the same `modid`. In that case, higher-priority mod's assets win; lower-priority mod's assets are prefixed `<modid>_alt/`.
+### 3F. Ore Y-Band Redistribution
 
-### J4B. Language File Merging
-
-```python
-def merge_lang_files(all_mods: dict, output_dir: str):
-    """Merges all en_us.json (and other locales) from all mods."""
-    from collections import defaultdict
-    locale_maps = defaultdict(dict)
-
-    # Process in priority order (highest last = wins on conflict)
-    for mod_id, mod in sorted(all_mods.items(), key=lambda x: x[1]["meta"]["version"]):
-        for locale, entries in mod["lang"].items():
-            for key, value in entries.items():
-                locale_maps[locale][key] = value  # last write (highest priority) wins
-
-    for locale, entries in locale_maps.items():
-        out_path = f"{output_dir}/assets/compat/lang/{locale}.json"
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "w") as f: json.dump(entries, f, indent=2, ensure_ascii=False)
+```
+Per dimension:
+  1. Collect all ore features from all add-ons for this dimension.
+  2. Sort by tier: stone(0) iron(1) gold(2) diamond(3) netherite(4) custom(5+).
+  3. Dimension Y ranges:
+       overworld: [-64, 320] = 384 blocks
+       nether:    [0, 128]   = 128 blocks
+       end:       [0, 256]   = 256 blocks
+       custom:    [dim.y_min, dim.y_max]
+  4. band_size = max(16, floor(range / ore_count))
+     If band_size < 8: compress to 8, flag in README.
+  5. Assign: ore[i].y_min = dim_min + i*band_size
+             ore[i].y_max = dim_min + (i+1)*band_size
+  6. Rewrite feature JSONs in MergedPack_BP/features/.
+  7. Emit ore Y-band table in README.
 ```
 
-### J4C. Sound Event Merging
+### 3G. Cross-Loot Injection
 
-All `sounds.json` files are merged; event name collisions take the higher-priority mod's definition. All sound files are copied preserving their original `assets/<modid>/sounds/` paths.
+`MergedPack_BP/loot_tables/compat/cross_addon_pool.json` — pool containing injectable items from ALL add-ons.
+Inject into every add-on's loot tables by adding this pool to existing files (per Phase 2C loot table merge).
 
-### J4D. Particle Merging
+Context → categories:
 
-All `assets/<modid>/particles/` directories copied as-is; namespace isolation prevents collisions.
+| Path substring | Inject categories |
+|----------------|-------------------|
+| `mine`/`mineshaft`/`cave` | `ingot`, `raw_ore`, `nugget` |
+| `village`/`farm`/`harvest` | `food`, `seed`, `sapling` |
+| `dungeon`/`castle`/`fortress`/`bastion` | `ingot`, `armor_piece`, `misc` |
+| `forest`/`tree`/`hollow` | `food`, `seed`, `sapling`, `misc` |
+| `nether`/`hell` | `ingot`, `misc` |
+| `end`/`chorus`/`city` | `ingot`, `misc` |
+| `shipwreck`/`ocean`/`ruin` | `raw_ore`, `misc` |
+| `temple`/`pyramid`/`jungle` | `food`, `ingot`, `misc` |
+| fallback | `ingot`, `misc` |
+
+Weight+count: ingot(10,1–3), nugget(18,2–8), raw_ore(12,1–4), food(10,1–3), seed(20,1–5), sapling(8,1–2), armor_piece(4,1–1), misc(6,1–2).
+
+Items in the pool come from OTHER add-ons only (never self-injection).
+
+### 3H. Cross-Smelting and Cross-Repair
+
+- Expand `tags[]` on ALL furnace recipes to union of all recipe station tags across all add-ons + `blast_furnace`.
+- Cross-repair: for every tool with `minecraft:repairable`, if any other add-on has a same-tier material, add it to `repair_items[]` in the merged item JSON.
+
+### 3I. Mob Harmony
+
+`MergedPack_BP/scripts/compat/mob_harmony.js`:
+
+```js
+import { world, system, ItemStack } from "@minecraft/server";
+
+// Populated from ADDON_MAP
+const FRIENDLY_MOBS = new Set(["customfarm:friendly_golem","treecutter:wood_sprite"]);
+const HOSTILE_MOBS  = new Set(["custommetal:ore_golem"]);
+const CROSS_TAME  = [ { mob: "treecutter:spirit_wolf",   items: new Set(["custommetal:stellite_nugget","customfarm:starwheat"]) } ];
+const CROSS_BREED = [ { mob: "customfarm:giant_chicken", items: new Set(["treecutter:spirit_sap"]) } ];
+
+world.beforeEvents.entityHurt.subscribe((ev) => {
+  if (!FRIENDLY_MOBS.has(ev.entity.typeId)) return;
+  const src = ev.damageSource.damagingEntity;
+  if (!src) return;
+  const victimNs   = ev.entity.typeId.split(":")[0];
+  const attackerNs = src.typeId.split(":")[0];
+  if (attackerNs !== "minecraft" && attackerNs !== victimNs && HOSTILE_MOBS.has(src.typeId))
+    ev.cancel = true;
+});
+
+world.afterEvents.entityHitEntity.subscribe(({ damagingEntity, hitEntity }) => {
+  if (damagingEntity?.typeId !== "minecraft:player") return;
+  const player = damagingEntity;
+  for (const entry of CROSS_TAME) {
+    if (hitEntity.typeId !== entry.mob) continue;
+    const held = player.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+    if (!held || !entry.items.has(held.typeId)) continue;
+    system.run(() => {
+      hitEntity.addTag(`tamed_by_${player.id}`);
+      hitEntity.nameTag = `${player.name}'s ${hitEntity.typeId.split(":")[1]}`;
+      const inv = player.getComponent("minecraft:inventory")?.container;
+      if (inv) {
+        const item = inv.getItem(player.selectedSlotIndex);
+        if (item && item.amount > 0) {
+          item.amount--;
+          inv.setItem(player.selectedSlotIndex, item.amount === 0 ? undefined : item);
+        }
+      }
+    });
+    break;
+  }
+});
+```
+
+Generate cross-biome spawn rules in `MergedPack_BP/spawn_rules/compat/` for climate-compatible mob+biome pairs (same climate matrix as Phase 3D).
+
+### 3J. Wandering Trader Cross-Trades
+
+`MergedPack_BP/trading_tables/compat/wandering_trader_compat.json` — one trade entry per injectable item across all add-ons. Price: `max(1, min(16, floor(lootWeight / 2)))`.
+
+### 3K. Sound, Particle, Fog, and Lang Merge
+
+- **Sounds:** Merge all `sound_definitions.json` events per Phase 2D rules.
+- **Particles:** Copy all; rename colliding identifiers; update all script + entity JSON refs.
+- **Fog:** Copy all; rename collisions; update biome JSON refs.
+- **Lang:** Union all `en_US.lang`; higher-priority wins on duplicate; append compat entries.
 
 ---
 
-## Phase J5 — Modpack Manifest Generation
+## Phase 4 — Merged Manifests
 
-### J5A. Fabric — generate `fabric.mod.json` for the merged compat mod
+### MergedPack_BP/manifest.json
 
 ```json
 {
-  "schemaVersion": 1,
-  "id":          "mergedpack_compat",
-  "version":     "1.0.0",
-  "name":        "<ModA> + <ModB> + ... Merged Compat",
-  "description": "Cross-mod compatibility layer. Requires all component mods to be present.",
-  "authors":     ["Auto-generated by bedrock-addon-combiner v3"],
-  "license":     "MIT",
-  "environment": "*",
-  "entrypoints": {
-    "main":   ["compat.MergedPackInit"],
-    "client": ["compat.MergedPackClientInit"]
+  "format_version": 2,
+  "header": {
+    "name": "<AddonA> + <AddonB> + ... Merged Pack",
+    "description": "Fully merged modpack. All add-on content combined. Auto-generated.",
+    "uuid": "<new-uuid-bp-header>",
+    "version": [1, 0, 0],
+    "min_engine_version": [<highest across all addons>]
   },
-  "depends": {
-    "fabricloader": ">=0.14",
-    "minecraft":    "<mc_version from highest mod>",
-    "<mod_a_id>":   "<mod_a_version>",
-    "<mod_b_id>":   "<mod_b_version>"
-  }
+  "modules": [
+    { "type": "data",   "uuid": "<new-uuid-bp-data>",   "version": [1, 0, 0] },
+    { "type": "script", "language": "javascript",
+      "uuid": "<new-uuid-bp-script>", "version": [1, 0, 0], "entry": "scripts/main.js" }
+  ],
+  "dependencies": [
+    { "uuid": "<MergedPack-RP-UUID>", "version": [1, 0, 0] },
+    { "module_name": "@minecraft/server",    "version": "<highest across all addons>" },
+    { "module_name": "@minecraft/server-ui", "version": "<highest across all addons>" }
+  ],
+  "capabilities": ["script_eval"]
 }
 ```
 
-### J5B. Forge — generate `META-INF/mods.toml` for the compat mod
+**Original add-on UUIDs are NOT dependencies — their content is fully merged in.**
 
-```toml
-modLoader="javafml"
-loaderVersion="[47,)"
-license="MIT"
+### MergedPack_RP/manifest.json
 
-[[dependencies.mergedpack_compat]]
-    modId="forge"
-    mandatory=true
-    versionRange="[47,)"
-    ordering="NONE"
-    side="BOTH"
-
-[[dependencies.mergedpack_compat]]
-    modId="minecraft"
-    mandatory=true
-    versionRange="[<mc_version>,)"
-    ordering="NONE"
-    side="BOTH"
-
-[[mods]]
-modId="mergedpack_compat"
-version="1.0.0"
-displayName="Merged Pack Compat"
-description="Cross-mod compatibility data. Requires all merged mods present."
-```
-
-### J5C. Modpack ZIP layout
-
-```
-<ModA>_<ModB>_merged_modpack.zip
-├── mods/
-│   ├── <ModA>.jar                    ← original mod JARs (user provides)
-│   ├── <ModB>.jar
-│   └── mergedpack_compat-1.0.0.jar   ← generated compat JAR (data-only)
-│
-├── config/                            ← merged config files
-│   ├── <mod_a_config>.toml
-│   └── <mod_b_config>.toml
-│
-├── resourcepacks/
-│   └── mergedpack_resources.zip       ← merged lang + any RP overrides
-│
-├── data/                              ← merged data pack (cross-mod recipes, tags, loot)
-│   ├── compat/
-│   │   ├── recipes/
-│   │   ├── tags/
-│   │   ├── loot_tables/
-│   │   └── advancements/
-│   └── c/                             ← Fabric common tags (c: namespace)
-│       └── tags/
-│
-├── MixinCompatReport.md               ← mixin conflict report
-├── CompatReport.md                    ← full merge summary
-└── README.md
-```
-
-### J5D. Generate the compat data JAR
-
-```bash
-COMPAT_DIR="/home/claude/java_merged/compat_jar"
-mkdir -p "$COMPAT_DIR/data" "$COMPAT_DIR/assets" "$COMPAT_DIR/META-INF"
-
-# Copy all cross-mod data
-cp -r /home/claude/java_merged/data/compat "$COMPAT_DIR/data/"
-cp -r /home/claude/java_merged/data/c      "$COMPAT_DIR/data/" 2>/dev/null || true
-cp -r /home/claude/java_merged/data/forge  "$COMPAT_DIR/data/" 2>/dev/null || true
-
-# Write fabric.mod.json or mods.toml depending on detected loader
-# (generated in J5A / J5B above)
-
-# Package as JAR (which is just a ZIP)
-cd "$COMPAT_DIR"
-zip -r "/home/claude/java_merged/mergedpack_compat-1.0.0.jar" data/ assets/ fabric.mod.json 2>/dev/null || \
-zip -r "/home/claude/java_merged/mergedpack_compat-1.0.0.jar" data/ assets/ META-INF/
-
-echo "✓ compat JAR: $(du -sh /home/claude/java_merged/mergedpack_compat-1.0.0.jar | cut -f1)"
+```json
+{
+  "format_version": 2,
+  "header": {
+    "name": "<AddonA> + <AddonB> + ... Merged RP",
+    "description": "Fully merged resource pack. All textures, sounds, models, lang from all add-ons.",
+    "uuid": "<new-uuid-rp-header>",
+    "version": [1, 0, 0],
+    "min_engine_version": [<highest across all addons>]
+  },
+  "modules": [
+    { "type": "resources", "uuid": "<new-uuid-rp-module>", "version": [1, 0, 0] }
+  ],
+  "dependencies": []
+}
 ```
 
 ---
 
-## Phase J6 — Java Mod Validation
+## Phase 5 — Validation Pass
+
+Run after full merge, before packaging. Auto-fix where possible; log unfixable issues.
+
+### 5A. BP Validation
 
 | Check | Auto-fix |
 |-------|----------|
-| Cross-mod recipe references an item ID that doesn't exist in any mod | Remove that recipe; log warning |
-| Tag value references an ID not found in any mod | Remove that entry from the tag; log warning |
-| Two mixin configs inject into same method at same injection point | Cannot auto-fix; document in MixinCompatReport.md |
-| Config file uses same key with incompatible types across mods | Keep higher-priority mod's type; log warning |
-| Advancement references item that doesn't exist | Replace with `minecraft:nether_star`; log warning |
-| Biome spawn entry references entity that doesn't exist | Remove spawn entry; log warning |
-| Loot table cross-injection would push pool count > 20 | Cap at 20 pools; log warning |
-| Two mods declare same custom registry ID | Higher-priority wins; log warning |
-| Compat JAR depends on mod ID not found in uploads | Add note in README: required mod missing |
+| Item ID in recipe doesn't exist in merged pack | Remove that ingredient; log |
+| Block ID in loot table entry doesn't exist | Remove entry; log |
+| Entity ID in spawn_rules not in entities/ | Remove spawn rule; log |
+| Animation ID in entity JSON not in animations/ | Try renamed `<addon>_` prefix; if still missing, remove ref; log |
+| Animation controller ID not found | Same as above |
+| Feature ID in feature_rules not in features/ | Remove feature_rule; log |
+| `/function` call in .mcfunction references missing function | Comment line: `# [MERGE WARNING] missing: <name>`; log |
+| `/structure load` references missing .mcstructure | Comment line; log |
+| Loot table path in entity `minecraft:loot` doesn't exist | Remove loot component; log |
+| Scoreboard objective name collision in scripts | Already wrapped idempotently by guard |
+
+### 5B. RP Validation
+
+| Check | Auto-fix |
+|-------|----------|
+| Texture path in item_texture.json doesn't exist | Log; point to `textures/misc/missing_texture` |
+| Texture path in terrain_texture.json doesn't exist | Same |
+| Geometry ID in render_controller not in models/entity/ | Log; fall back to `geometry.humanoid` |
+| Texture key in render_controller not in texture atlas | Log; use missing_texture |
+| Render controller ID in entity client JSON not found | Log; remove that controller from entity |
+| Animation ID in entity client JSON not found | Log; remove that animation entry |
+| Sound event in entity client JSON not in sound_definitions.json | Log; remove sound entry |
+| Particle ID in entity JSON not in particles/ | Log; remove particle entry |
+| Attachable geometry/texture/render_controller ref not found | Log; skip that attachable |
+| Fog ID in biome JSON not in fog/ | Log; remove fog reference |
+
+### 5C. Script Validation
+
+| Check | Auto-fix |
+|-------|----------|
+| Import path resolves to non-existent file after remapping | Comment out import in main.js; log |
+| Script references block/item/entity ID not in merged pack | Log in README (cannot fix at script level) |
+| Script uses `@minecraft/server` API above declared version | Update version pin in manifest |
 
 ---
 
-## Phase J7 — Java Merge README
+## Phase 6 — Package as Single `.mcaddon`
+
+### Final layout
+
+```
+<AddonA>_<AddonB>_merged.mcaddon
+├── MergedPack_BP/
+│   ├── manifest.json
+│   ├── items/, blocks/, entities/, loot_tables/, recipes/
+│   ├── trading_tables/, features/, feature_rules/, biomes/
+│   ├── dimensions/, spawn_rules/, animation_controllers/
+│   ├── animations/, structures/, functions/
+│   └── scripts/
+│       ├── main.js
+│       ├── addon_<name>/        (one per add-on with scripts)
+│       └── compat/
+│           ├── script_event_guard.js
+│           ├── tree_cutter.js
+│           ├── tool_block_matrix.js
+│           ├── soil_crop.js
+│           ├── loot_injector.js
+│           ├── dimension_portals.js
+│           ├── mob_harmony.js
+│           └── trade_injector.js
+├── MergedPack_RP/
+│   ├── manifest.json
+│   ├── textures/ (item_texture.json + terrain_texture.json merged)
+│   ├── models/, render_controllers/, animations/
+│   ├── animation_controllers/, particles/, sounds/
+│   ├── fog/, attachables/, ui/
+│   ├── texts/en_US.lang
+│   └── biomesClient.json
+└── README.md
+```
+
+### Packaging
+
+```bash
+WORK="/home/claude/merged"
+NAME="<AddonA>_<AddonB>_merged"
+cp /home/claude/README.md "$WORK/README.md"
+cd "$WORK"
+zip -r "/mnt/user-data/outputs/${NAME}.mcaddon" MergedPack_BP/ MergedPack_RP/ README.md
+echo "✓ ${NAME}.mcaddon — BP: $(find MergedPack_BP -type f | wc -l) files, RP: $(find MergedPack_RP -type f | wc -l) files"
+```
+
+Naming: `<A>_<B>[_<C>]_merged.mcaddon` (max 3 names; `_and_N_more` if exceeded).
+
+---
+
+## Phase 7 — Embedded README.md
 
 ```markdown
-# Merged Modpack: [ModA] + [ModB] + ...
-Auto-generated by bedrock-addon-combiner v3 — Java pipeline.
+# Merged: [AddonA] + [AddonB] + ...
+Auto-generated by bedrock-addon-combiner v4.
 
 ## Install
-1. Place ALL `.jar` files from `mods/` into your `.minecraft/mods/` folder.
-2. Place contents of `config/` into `.minecraft/config/`.
-3. Place `mergedpack_resources.zip` into `.minecraft/resourcepacks/` and enable it.
-4. The `data/` folder is embedded in `mergedpack_compat-1.0.0.jar` — no manual install needed.
+Double-click `<filename>.mcaddon`. Activate ONE BP + ONE RP in world settings.
 
-## Mods merged
-| Mod | ID | Version | Loader | Items | Blocks | Entities |
-|-----|----|---------|--------|-------|--------|----------|
+## Engine version
+Merged pack targets Bedrock [min_engine_version]. All add-ons migrated to this version's formats.
 
-## Cross-features active
+## Add-ons merged
+| Add-on | Version | Engine | Items | Blocks | Entities | Scripts |
+|--------|---------|--------|-------|--------|----------|---------|
+
+## Cross-features
 | Feature | Details |
 |---------|---------|
-| ✅ Unified Tags (c:) | [N] unified tag files covering ingots, ores, logs, foods, gems |
-| ✅ Cross-Smelting | [N] cross-mod smelting recipes generated |
-| ✅ Cross-Loot | [N] items injected into [N] loot tables |
-| ✅ Cross-Spawning | [N] mobs added to [N] biomes |
-| ✅ Cross-Advancements | Merged Pack Explorer advancement |
-| ✅ Config Merge | [N] config files merged |
-| ✅ Lang Merge | [N] language keys merged |
+| ✅ Tree Cutting | Tools: [...] Logs: [...] Decorations handled: [...] |
+| ✅ Log Stripping | All axes strip all modded logs |
+| ✅ Tool–Block Matrix | Pickaxe tiers enforced; hoes till modded soils |
+| ✅ Soil & Crops | Cross-planting and cross-fertilizing active |
+| ✅ Loot Injection | [N] items across [N] tables |
+| ✅ Cross-Smelting | [N] recipes; [N] cross-repair entries |
+| ✅ Ore Y-Bands | See table below |
+| ✅ Dimension Portals | [list or "None"] |
+| ✅ Mob Harmony | Protected: [...] Cross-taming: [...] |
+| ✅ Wandering Trader | [N] trades |
+| ✅ Lang | [N] entries merged |
 
-## Mixin Compatibility
-| Mod A | Mod B | Target Class | Conflict? | Action |
-|-------|-------|-------------|-----------|--------|
+## Ore Y-band distribution
+| Ore | Dimension | Y min | Y max | Band size |
+|-----|-----------|-------|-------|-----------|
+
+## Tree decorations handled
+| Block | Strategy | Notes |
+|-------|----------|-------|
 
 ## Conflicts resolved
-| # | Type | Mods | Conflict | Resolution |
-|---|------|------|----------|------------|
+| # | Type | Add-ons | Conflict | Resolution |
+|---|------|---------|----------|------------|
+
+## Validation warnings
+| # | File | Issue | Action taken |
+|---|------|-------|--------------|
 
 ## Manual review required
-[List any mixin conflicts requiring user intervention]
-[List any capabilities that could not be auto-merged]
+[UI screen conflicts that could not be auto-merged]
 
 ## Known limitations
-- This tool generates a data-only compat JAR; it cannot recompile Java source code.
-- Mixin conflicts at the same injection point require manual resolution.
-- Shader mods (Iris, Optifine, Sodium) are copied as-is; no merge attempted.
-- Mod-specific GUIs and custom inventory logic are not merged — only data/recipes/tags.
-- Always test the merged modpack in a fresh world before use.
+- Beta APIs / Scripting API must be enabled in world settings.
+- Not compatible with Education Edition.
+- Loot injection targets only loot table paths known at generation time.
+- UI screen merging requires manual intervention (see above).
+- Trees > 256 connected logs are partially felled.
 ```
 
 ---
 
-# ═══════════════════════════════════════════════════
-# BEDROCK ADD-ON MERGE PIPELINE — Phases 0–7
-# ═══════════════════════════════════════════════════
-
-*(All phases from v2 are preserved in full below, including Phase 0 Java→Bedrock bridge, Phases 1–7 Bedrock full merge, custom machines, function compatibility, UI bridge, scoreboard guard, and gametest bridge.)*
-
----
-
-## Routing Summary
-
-```
-User uploads .jar files only       → Phase J1 → J2 → J3 → J4 → J5 → J6 → J7
-User uploads .mcaddon files only   → Phase 0  → 1  → 2  → 3  → 4  → 5  → 6  → 7
-User uploads mix of both           → Phase J (for jars) + Phases 0-7 (for mcaddons)
-                                     then cross-link: Java stubs added to Bedrock merged pack
-```
-
----
-
-## Phase 0 — Java→Bedrock Conversion Bridge
-
-*(Full Phase 0 from v2 — J0A extract, J0B detect loader, J0C generate Bedrock stubs, J0D conversion report)*
-
-### 0A. Extract and detect *(same as v2)*
-### 0B. Detect mod loader *(same as v2)*
-### 0C. Generate Bedrock stubs per Java item/block/entity *(same as v2)*
-### 0D. Conversion report *(same as v2)*
-
----
-
-## Phase 1 — Bedrock Deep Inventory
-*(Full Phase 1 from v2 — extract, classify, inventory BP+RP, ADDON_MAP, categorization)*
-
-## Phase 2 — Bedrock Conflict Detection and Merge
-*(Full Phase 2 from v2 — priority order, namespace conflicts, BP file merging, RP merging, custom machine recipe tag merging, UI screen merging)*
-
-## Phase 3 — Bedrock Cross-Features Weaving
-*(Full Phase 3 from v2 — tree cutting, log stripping, tool-block matrix, soil/crop, fertilizers, ore Y-bands, climate injection, dimension portals, ore Y-redistribution, cross-loot, cross-smelting, mob harmony, wandering trader, sounds/particles/fog/lang, custom machine compat, function compat, scoreboard guard, UI bridge, gametest bridge)*
-
-## Phase 4 — Bedrock Manifests
-*(Full Phase 4 from v2)*
-
-## Phase 5 — Bedrock Validation
-*(Full Phase 5 from v2 — BP validation, RP validation, script validation, custom machine validation, function validation, Java bridge validation)*
-
-## Phase 6 — Bedrock Package
-*(Full Phase 6 from v2 — final layout with java_bridge/ folder, packaging commands)*
-
-## Phase 7 — Bedrock README
-*(Full Phase 7 from v2)*
-
----
-
-## Edge Cases (v3 additions)
+## Edge Cases
 
 | Situation | Handling |
 |-----------|----------|
-| Java mod is a library/API (no items/blocks) | Extract its tag definitions and API stubs; include in unified tags; note in report |
-| Two Java mods have same `mod_id` | Lower-priority renamed to `<name>_alt` throughout; log |
-| Java mod uses Kotlin or Scala | Treat same as Java for data extraction; note compiled language in report |
-| Java mod is server-only (`"environment": "server"`) | Skip client assets; still merge data |
-| Java mod is client-only (`"environment": "client"`) | Skip data; still merge assets/lang |
-| Forge mod uses `@ObjectHolder` for cross-mod item references | Note in MixinCompatReport; cannot auto-resolve static references |
-| Mod uses custom codec/registry not in standard `data/` structure | Copy data as-is; note in report as "non-standard data format" |
-| Mixed Fabric + Forge mods uploaded together | Generate both `fabric.mod.json` and `mods.toml` for compat JAR; note loader incompatibility in README |
-| Java mod version > current MC stable | Warn; continue; note possible incompatibility |
-| Compat JAR would exceed 50MB | Split into multiple compat JARs by feature area; note in README |
-| All uploaded Java mods are from same mod author/pack | Note likely already compatible; generate tags/recipes only; skip mixin conflict check |
-| Java mod uses `pack.mcmeta` data pack format directly | Treat its `data/` as a data pack; merge normally |
-| *(all v2 Bedrock edge cases also apply)* | *(see v2 edge cases section)* |
+| Add-on has no BP (RP-only) | Merge RP only; skip BP cross-linking |
+| Legacy `minecraft:item` wrapper format | Convert to flat component format matching highest engine version |
+| No loot tables in add-on | Skip loot injection; note in README |
+| Encrypted `.mcaddon` | Skip entirely; warn user |
+| More than 2 add-ons | All logic is fully N-way |
+| Tool tier undetectable | Default to `diamond` |
+| Combined output > 200 MB | Warn user; proceed |
+| No script entry point declared | Scan `scripts/` root for `index.js`/`main.js`; import all root `.js` files if not found |
+| Two add-ons pin different `@minecraft/server` versions | Use highest in merged manifest |
+| Duplicate `.mcstructure` | Rename lower-priority to `<addon>_<original>`; update `/structure load` calls |
+| Add-on A references items from add-on B (also being merged) | Both in merged pack — resolves natively; no action |
+| Add-on A ore requires add-on B pickaxe tier | `tool_block_matrix.js` handles this automatically |
+| TOML config collision | Use safe deep-merge (Phase 2E) — no duplicate table headers |
+| Tree > 256 connected logs | Fell up to MAX_FELL; leave rest; note in README |
+| Unknown decoration block matching keywords | Apply `"remove"` strategy as safe default |
+| `world_template` module | Extract settings as data module; warn user |
+| Script imports third-party npm package | Copy as-is; note in README that package must be side-loaded |
+| Add-on uses `format_version 1.8` spawn rules | Parse as-is; valid in all engine versions |
