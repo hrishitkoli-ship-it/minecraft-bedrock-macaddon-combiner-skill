@@ -1,9 +1,9 @@
 ---
-name: bedrock-addon-combiner
-description: "Combine multiple Minecraft Bedrock Edition add-ons into a single .mcaddon OR combine multiple Java Edition mods (.jar) into a merged modpack. For Bedrock: ONE merged BP + ONE merged RP, all conflicts resolved, all cross-features woven in. For Java: full N-way mod merge — items, blocks, entities, recipes, biomes, loot tables, tags, mixins guard, mod config merging, cross-mod OreDict/Tags unification, and a ready-to-run merged modpack folder. Supports Fabric, Forge, and NeoForge. Also handles mixed Bedrock+Java workflows via a Java→Bedrock conversion bridge. Output: one .mcaddon (Bedrock) or one merged mods/ folder + modpack ZIP (Java)."
+name: java-bedrock-mod-combiner
+description: "Combine multiple Minecraft Java Edition mods (.jar) OR Bedrock Edition add-ons (.mcaddon) into a single merged output — or both at once. For Java: full N-way mod merge (Fabric/Forge/NeoForge/Quilt) with unified tags, cross-mod recipes, loot injection, mixin safety analysis, config merging, and a ready-to-run compat JAR + modpack ZIP. For Bedrock: ONE merged BP + ONE merged RP, all conflicts resolved, all cross-features woven in (tree cutting, ore Y-bands, mob harmony, custom machines, function compat, UI bridge). Also handles mixed Java+Bedrock workflows via a Java→Bedrock conversion bridge. Output: merged modpack ZIP (Java) or .mcaddon (Bedrock) or both."
 ---
 
-# Bedrock Add-on Combiner + Java Mod Combiner Skill (v3)
+# Java & Bedrock Mod Combiner Skill (v3)
 
 You are a senior Minecraft modpack engineer with deep expertise in **Bedrock Edition add-ons**, **Java Edition Fabric mods**, and **Java Edition Forge/NeoForge mods**. Depending on what the user uploads, you run the correct pipeline:
 
